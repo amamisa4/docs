@@ -1,0 +1,1418 @@
+<tree>
+Sortly/
+  js/
+    api.js
+    app.js
+    state.js
+    ui.js
+  .last_folder
+  app.css
+  index.html
+  README.md
+  requirements.txt
+  server.py
+  起動.bat
+</tree>
+
+<file path="app.css">
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
+
+:root {
+  --bg: #0f0f11;
+  --surface: #18181c;
+  --surface2: #222228;
+  --border: #2e2e38;
+  --text: #e8e8f0;
+  --text-dim: #6e6e88;
+  --accent: #7c6af7;
+  --accent-glow: rgba(124, 106, 247, 0.25);
+  --green: #4ade80;
+  --green-glow: rgba(74, 222, 128, 0.2);
+  --orange: #fb923c;
+  --orange-glow: rgba(251, 146, 60, 0.2);
+  --red: #f87171;
+
+  --mono: 'JetBrains Mono', monospace;
+  --sans: 'Noto Sans JP', sans-serif;
+
+  --h-header: 49px;
+  --h-status: 64px;
+}
+
+*    { box-sizing: border-box; margin: 0; padding: 0; }
+html,
+body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ─── Header ──────────────────────────────────────────────────────────────── */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.logo {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent);
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.folder-bar {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.folder-path {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+/* ─── Buttons ─────────────────────────────────────────────────────────────── */
+.btn {
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+  white-space: nowrap;
+}
+
+.btn:hover    { opacity: 0.85; }
+.btn:active   { transform: scale(0.97); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+.btn.secondary {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.btn.success { background: var(--green);  color: #000; }
+.btn.danger  { background: var(--red);    color: #fff; }
+
+/* ─── Status bar ──────────────────────────────────────────────────────────── */
+.statusbar {
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  position: sticky;
+  top: var(--h-header);
+  z-index: 99;
+}
+
+.group-badge  { display: flex; align-items: center; gap: 8px; }
+.group-label  { color: var(--text-dim); font-family: var(--mono); }
+
+.group-name {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent);
+  background: var(--accent-glow);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 10px;
+}
+
+.group-count       { color: var(--text-dim); font-family: var(--mono); font-size: 11px; }
+.statusbar-actions { margin-left: auto; display: flex; gap: 8px; }
+
+.mode-hint {
+  width: 100%;
+  padding-top: 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mode-hint span   { color: var(--orange); }
+.mode-hint span.g { color: var(--green); }
+
+/* ─── Layout ──────────────────────────────────────────────────────────────── */
+.layout { flex: 1; min-height: 0; display: flex; }
+
+/* ─── Sidebar ─────────────────────────────────────────────────────────────── */
+.sidebar {
+  width: 240px;
+  min-width: 240px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.group-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.sidebar-new-btn { margin: 12px; }
+
+.group-chip {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.group-chip:hover  { border-color: var(--accent); color: var(--accent); }
+.group-chip.active { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.chip-count        { opacity: 0.7; font-size: 10px; }
+
+/* ─── Main panel ──────────────────────────────────────────────────────────── */
+.main-panel { flex: 1; overflow-y: auto; padding: 20px; }
+
+#grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+/* ─── Card ────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.12s, box-shadow 0.15s;
+  position: relative;
+  user-select: none;
+}
+
+.card:hover        { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); }
+.card.staged       { border-color: var(--orange); background: #1e1a14; }
+.card.staged:hover { border-color: #fbbf24; }
+
+.card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: var(--surface2); }
+
+.card-footer   { padding: 6px 8px; font-family: var(--mono); font-size: 10px; line-height: 1.4; }
+.card-original { color: var(--text-dim); word-break: break-all; }
+.card-preview  { margin-top: 2px; font-weight: 700; color: var(--orange); word-break: break-all; }
+
+.card-badge {
+  position: absolute;
+  top: 6px; right: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--orange);
+  color: #000;
+}
+
+/* ─── Empty state ─────────────────────────────────────────────────────────── */
+#empty {
+  height: 60vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-dim);
+}
+
+#empty .icon { font-size: 48px; }
+#empty p     { font-size: 14px; }
+
+/* ─── Modal ───────────────────────────────────────────────────────────────── */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-overlay.open { display: flex; }
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 32px;
+  min-width: 360px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.modal h3 { margin-bottom: 6px; font-family: var(--mono); font-size: 14px; color: var(--accent); }
+.modal p  { margin-bottom: 16px; font-size: 12px; line-height: 1.6; color: var(--text-dim); }
+
+.modal input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 16px;
+}
+
+.modal input:focus { border-color: var(--accent); }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ─── Toast ───────────────────────────────────────────────────────────────── */
+#toast-container {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 300;
+}
+
+.toast {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--green);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.toast.error { border-left-color: var(--red); color: var(--red); }
+</file>
+
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Image Classifier</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+
+<body>
+
+  <header>
+    <div class="logo">[ IMG/CLF ]</div>
+
+    <div class="folder-bar">
+      <button class="btn" id="btn-pick">
+        📂 フォルダを選択
+      </button>
+
+      <span class="folder-path" id="folder-path">—</span>
+
+      <button class="btn secondary" id="btn-reload" disabled>
+        ↺ 更新
+      </button>
+    </div>
+  </header>
+
+  <div class="statusbar">
+    <div class="group-badge">
+      <span class="group-label">グループ:</span>
+      <span class="group-name" id="current-group-display">—</span>
+      <span class="group-count" id="current-group-count"></span>
+    </div>
+
+    <div class="statusbar-actions">
+      <button class="btn danger" id="btn-cancel-group" disabled>
+        グループ全キャンセル
+      </button>
+      <button class="btn success" id="btn-commit" disabled>
+        ✓ 確定してリネーム
+      </button>
+    </div>
+
+    <div class="mode-hint" id="mode-hint">
+      フォルダを読み込んでください
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">GROUPS</div>
+
+      <div id="group-chips" class="group-list"></div>
+
+      <button class="btn secondary sidebar-new-btn" id="btn-new-group">
+        + 新グループ
+      </button>
+    </aside>
+
+    <main class="main-panel">
+      <div id="empty">
+        <div class="icon">📁</div>
+        <p>フォルダを指定して画像を読み込んでください</p>
+      </div>
+
+      <div id="grid" style="display:none"></div>
+    </main>
+  </div>
+
+  <div id="toast-container"></div>
+
+  <!-- モーダル -->
+  <div class="modal-overlay" id="prefix-modal">
+    <div class="modal">
+      <h3>新しいグループ名を入力</h3>
+      <p>
+        クリックした画像を1枚目として新しいグループを作成します。<br>
+        グループ名（プレフィックス）を入力してください。
+      </p>
+      <input type="text" id="prefix-input" placeholder="例: cat, landscape, 風景 ..." maxlength="80">
+      <div class="modal-actions">
+        <button class="btn secondary" id="btn-modal-cancel">キャンセル</button>
+        <button class="btn" id="btn-modal-confirm">決定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ES Modules として読み込む。type="module" により CORS 制限に注意 -->
+  <script type="module" src="js/app.js"></script>
+</body>
+
+</html>
+</file>
+
+<file path="js/api.js">
+/**
+ * api.js
+ * サーバーとの通信を担当するモジュール。
+ * 全ての fetch 呼び出しはここに集約する。
+ */
+
+export const API = 'http://127.0.0.1:5000/api';
+
+/**
+ * @returns {{ ok: boolean, folder?: string, error?: string }}
+ */
+export async function apiPickFolder() {
+  const res = await fetch(`${API}/pick_folder`, { method: 'POST' });
+  return res.json();
+}
+
+/**
+ * @returns {{ ok: boolean, folder?: string }}
+ */
+export async function apiLastFolder() {
+  const res = await fetch(`${API}/last_folder`);
+  return res.json();
+}
+
+/**
+ * @param {string} folder
+ * @returns {{ ok: boolean, folder?: string, error?: string }}
+ */
+export async function apiSetFolder(folder) {
+  const res = await fetch(`${API}/set_folder`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder }),
+  });
+  return res.json();
+}
+
+/**
+ * @returns {{ ok: boolean, images?: string[], error?: string }}
+ */
+export async function apiListImages() {
+  const res = await fetch(`${API}/images`);
+  return res.json();
+}
+
+/**
+ * @param {string} oldName
+ * @param {string} newName
+ * @returns {{ ok: boolean, error?: string }}
+ */
+export async function apiRename(oldName, newName) {
+  const res = await fetch(`${API}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ old: oldName, new: newName }),
+  });
+  return res.json();
+}
+
+/**
+ * サムネイル URL を返す（fetch ではなく <img src> に使用）。
+ * @param {string} filename
+ * @returns {string}
+ */
+export function thumbUrl(filename) {
+  return `${API}/thumb/${encodeURIComponent(filename)}`;
+}
+</file>
+
+<file path="js/app.js">
+/**
+ * app.js
+ * エントリポイント。イベントのバインドとフローの制御を担当する。
+ * ビジネスロジックは state.js、DOM 操作は ui.js に委譲する。
+ */
+
+import {
+  apiPickFolder, apiLastFolder, apiSetFolder,
+  apiListImages, apiRename,
+} from './api.js';
+
+import {
+  images, currentPrefix,
+  setCurrentPrefix, mergeImages,
+  stageImage, unstageImage,
+  cancelCurrentGroup, startNewGroup,
+  getStagedForCurrentPrefix,
+} from './state.js';
+
+import {
+  renderGrid, renderGroupChips,
+  updateStatus, setFolderDisplay,
+  toast, initModal, openModal, closeModal, getModalInputValue,
+} from './ui.js';
+
+// ─── 状態 ──────────────────────────────────────────────────────────────────────
+
+/** openModal 時に保留するカードインデックス */
+let pendingModalIdx = null;
+
+// ─── フォルダ操作 ──────────────────────────────────────────────────────────────
+
+async function pickFolder() {
+  const btn = document.getElementById('btn-pick');
+  btn.disabled = true;
+  btn.textContent = '選択中...';
+
+  try {
+    const data = await apiPickFolder();
+    if (!data.ok) {
+      if (data.error !== 'cancelled') toast(data.error, true);
+      return;
+    }
+    setFolderDisplay(data.folder);
+    await reloadImages();
+  } catch {
+    toast('サーバーに接続できません', true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '📂 フォルダを選択';
+  }
+}
+
+async function loadLastFolder() {
+  try {
+    const data = await apiLastFolder();
+    if (!data.ok || !data.folder) return;
+    await apiSetFolder(data.folder);
+    setFolderDisplay(data.folder);
+    await reloadImages();
+  } catch {
+    // 初回起動時はサーバー未起動の可能性があるためサイレントに失敗させる
+  }
+}
+
+async function reloadImages() {
+  try {
+    const data = await apiListImages();
+    if (!data.ok) { toast(data.error, true); return; }
+    mergeImages(data.images);
+    refresh();
+  } catch {
+    toast('サーバーに接続できません', true);
+  }
+}
+
+// ─── グリッド操作 ──────────────────────────────────────────────────────────────
+
+function onCardLeftClick(idx) {
+  const img = images[idx];
+
+  // 別グループにステージ済み → 操作拒否
+  if (img.stage && img.stage.prefix !== currentPrefix) {
+    toast(`この画像は「${img.stage.prefix}」にステージ中です`, true);
+    return;
+  }
+
+  // 同グループにステージ済み → 何もしない（重複防止）
+  if (img.stage && img.stage.prefix === currentPrefix) return;
+
+  // グループ未選択 → モーダルで新グループ作成
+  if (!currentPrefix) {
+    pendingModalIdx = idx;
+    openModal();
+    return;
+  }
+
+  stageImage(idx);
+  refresh();
+}
+
+function onCardRightClick(idx) {
+  const img = images[idx];
+  if (!img.stage) return;
+
+  if (img.stage.prefix !== currentPrefix) {
+    toast(`「${img.stage.prefix}」のステージは切り替えてから取り消してください`, true);
+    return;
+  }
+
+  unstageImage(idx);
+  refresh();
+  toast('選択を取り消しました');
+}
+
+// ─── グループ操作 ──────────────────────────────────────────────────────────────
+
+function startNewGroupMode() {
+  setCurrentPrefix(null);
+  updateStatus();
+  renderGroupChips(switchGroup);
+  toast('次にクリックした画像で新グループを作成します');
+}
+
+function switchGroup(name) {
+  setCurrentPrefix(name);
+  updateStatus();
+  renderGroupChips(switchGroup);
+  toast(`グループ切り替え: ${name}`);
+}
+
+function cancelGroup() {
+  if (!currentPrefix) return;
+  const count = cancelCurrentGroup();
+  if (count === 0) return;
+  refresh();
+  toast(`「${currentPrefix}」の選択をすべて取り消しました`);
+}
+
+async function commitGroup() {
+  if (!currentPrefix) return;
+
+  const staged = getStagedForCurrentPrefix().sort((a, b) => a.stage.n - b.stage.n);
+  if (staged.length === 0) return;
+
+  const btnCommit = document.getElementById('btn-commit');
+  btnCommit.disabled = true;
+  btnCommit.textContent = '処理中...';
+
+  let successCount = 0;
+
+  for (const img of staged) {
+    try {
+      const data = await apiRename(img.name, img.stage.previewName);
+      if (!data.ok) {
+        toast(`${img.name} → 失敗: ${data.error}`, true);
+        continue;
+      }
+      successCount++;
+    } catch {
+      toast(`${img.name} → 通信エラー`, true);
+    }
+  }
+
+  // ボタンは reloadImages → updateStatus で適切に更新されるが、
+  // finally で確実にテキストを戻す（例外時も含む）
+  btnCommit.textContent = '✓ 確定してリネーム';
+
+  await reloadImages();
+  toast(`${successCount} 枚をリネームしました`);
+}
+
+// ─── モーダル ──────────────────────────────────────────────────────────────────
+
+function onModalConfirm() {
+  const val = getModalInputValue();
+  if (!val) return;
+
+  const idx = pendingModalIdx;
+  pendingModalIdx = null;
+  closeModal();
+
+  startNewGroup(val);
+  updateStatus();
+  renderGroupChips(switchGroup);
+
+  if (idx !== null) {
+    stageImage(idx);
+    refresh();
+  }
+}
+
+function onModalCancel() {
+  closeModal();
+  pendingModalIdx = null;
+}
+
+// ─── ユーティリティ ────────────────────────────────────────────────────────────
+
+/** グリッド・チップ・ステータスをまとめて再描画する */
+function refresh() {
+  renderGrid(onCardLeftClick, onCardRightClick);
+  renderGroupChips(switchGroup);
+  updateStatus();
+}
+
+// ─── 初期化 ────────────────────────────────────────────────────────────────────
+
+function init() {
+  // ボタンのイベント
+  document.getElementById('btn-pick').addEventListener('click', pickFolder);
+  document.getElementById('btn-reload').addEventListener('click', reloadImages);
+  document.getElementById('btn-cancel-group').addEventListener('click', cancelGroup);
+  document.getElementById('btn-commit').addEventListener('click', commitGroup);
+  document.getElementById('btn-new-group').addEventListener('click', startNewGroupMode);
+
+  // モーダルのイベント
+  initModal(onModalConfirm, onModalCancel);
+
+  // 初期表示
+  updateStatus();
+  loadLastFolder();
+}
+
+init();
+</file>
+
+<file path="js/state.js">
+/**
+ * state.js
+ * アプリケーション状態と、状態を変更するビジネスロジックを管理する。
+ * DOM 操作は行わない。
+ */
+
+/** 完了済みファイル名のパターン: "prefix (n).ext" */
+export const COMPLETED_REGEX = /^(.+?) \((\d+)\)\.[^.]+$/i;
+
+/**
+ * @typedef {{ name: string, stage: { prefix: string, n: number, previewName: string } | null }} ImageEntry
+ */
+
+/** @type {ImageEntry[]} 未分類（未コミット）画像リスト */
+export let images = [];
+
+/** @type {string[]} フォルダ内の全ファイル名（コミット済みを含む） */
+export let dataAllImages = [];
+
+/** @type {string | null} 現在アクティブなグループ名 */
+export let currentPrefix = null;
+
+/**
+ * コミット済みグループの次の番号を管理する。
+ * { [prefix]: nextN }
+ * @type {Record<string, number>}
+ */
+export let committedGroups = {};
+
+/** @param {string | null} p */
+export function setCurrentPrefix(p) {
+  currentPrefix = p;
+}
+
+/**
+ * dataAllImages から committedGroups を再構築する。
+ * reloadImages の後に必ず呼ぶ。
+ */
+export function rebuildCommittedGroups() {
+  committedGroups = {};
+  for (const name of dataAllImages) {
+    const m = name.match(COMPLETED_REGEX);
+    if (!m) continue;
+    const prefix = m[1];
+    const n = parseInt(m[2], 10);
+    committedGroups[prefix] = Math.max(committedGroups[prefix] ?? 1, n + 1);
+  }
+}
+
+/**
+ * 現在のプレフィックスにステージ中の画像を返す。
+ * @returns {ImageEntry[]}
+ */
+export function getStagedForCurrentPrefix() {
+  if (!currentPrefix) return [];
+  return images.filter(img => img.stage?.prefix === currentPrefix);
+}
+
+/**
+ * 現在のプレフィックスで次に割り当てる番号を返す。
+ * @returns {number}
+ */
+export function nextStagedIndex() {
+  const base = committedGroups[currentPrefix] ?? 1;
+  return base + getStagedForCurrentPrefix().length;
+}
+
+/**
+ * 画像をステージ状態にする。
+ * @param {number} idx  images 配列のインデックス
+ * @returns {boolean}   成功したか
+ */
+export function stageImage(idx) {
+  if (currentPrefix === null) return false;
+  const img = images[idx];
+  if (!img || img.stage) return false;
+
+  const n = nextStagedIndex();
+  const ext = extractExt(img.name);
+  img.stage = {
+    prefix: currentPrefix,
+    n,
+    previewName: buildName(currentPrefix, n, ext),
+  };
+  return true;
+}
+
+/**
+ * 画像のステージを解除し、同プレフィックスの番号を詰め直す。
+ * @param {number} idx
+ * @returns {boolean}
+ */
+export function unstageImage(idx) {
+  const img = images[idx];
+  if (!img?.stage) return false;
+
+  const { prefix, n: removedN } = img.stage;
+  img.stage = null;
+
+  // 同プレフィックスで removedN より大きい番号を 1 ずつ詰める
+  for (const other of images) {
+    if (other.stage?.prefix === prefix && other.stage.n > removedN) {
+      other.stage.n--;
+      const ext = extractExt(other.name);
+      other.stage.previewName = buildName(prefix, other.stage.n, ext);
+    }
+  }
+  return true;
+}
+
+/**
+ * 現在のプレフィックスのステージをすべて解除する。
+ * @returns {number} 解除した枚数
+ */
+export function cancelCurrentGroup() {
+  const staged = getStagedForCurrentPrefix();
+  staged.forEach(img => { img.stage = null; });
+  return staged.length;
+}
+
+/**
+ * 新しいグループを開始する（モーダルで名前確定後に呼ぶ）。
+ * @param {string} prefix
+ */
+export function startNewGroup(prefix) {
+  currentPrefix = prefix;
+  if (!committedGroups[currentPrefix]) {
+    committedGroups[currentPrefix] = 1;
+  }
+}
+
+/**
+ * サーバーから受け取った images 配列で状態を更新する。
+ * 既存のステージ情報を保持するため、差分マージを行う。
+ * @param {string[]} rawImages
+ */
+export function mergeImages(rawImages) {
+  dataAllImages = [...rawImages];
+  rebuildCommittedGroups();
+
+  const existingMap = Object.fromEntries(images.map(img => [img.name, img]));
+
+  images = rawImages
+    .filter(name => !COMPLETED_REGEX.test(name))
+    .map(name => existingMap[name] ?? { name, stage: null });
+}
+
+// ─── ユーティリティ ───────────────────────────────────────────────────────────
+
+function extractExt(filename) {
+  const dot = filename.lastIndexOf('.');
+  return dot >= 0 ? filename.slice(dot + 1) : '';
+}
+
+function buildName(prefix, n, ext) {
+  return ext ? `${prefix} (${n}).${ext}` : `${prefix} (${n})`;
+}
+</file>
+
+<file path="js/ui.js">
+/**
+ * ui.js
+ * DOM 操作・レンダリングを担当するモジュール。
+ * 状態の読み取りは state.js から行う。状態の変更は行わない。
+ */
+
+import { thumbUrl } from './api.js';
+import {
+  images,
+  currentPrefix,
+  committedGroups,
+  getStagedForCurrentPrefix,
+} from './state.js';
+
+// ─── グリッド ──────────────────────────────────────────────────────────────────
+
+/**
+ * メイングリッドを再描画する。
+ * @param {(idx: number) => void} onLeftClick
+ * @param {(idx: number) => void} onRightClick
+ */
+export function renderGrid(onLeftClick, onRightClick) {
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('empty');
+
+  if (images.length === 0) {
+    grid.style.display = 'none';
+    empty.style.display = 'flex';
+    empty.querySelector('p').textContent = '未分類画像がありません';
+    return;
+  }
+
+  empty.style.display = 'none';
+  grid.style.display = 'grid';
+  grid.innerHTML = '';
+
+  images.forEach((img, idx) => {
+    const card = buildCard(img, idx);
+    card.addEventListener('click', () => onLeftClick(idx));
+    card.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      onRightClick(idx);
+    });
+    grid.appendChild(card);
+  });
+}
+
+/**
+ * カードを生成して返す。innerHTML へのファイル名直接埋め込みを避け、
+ * textContent を使って XSS を防ぐ。
+ * @param {import('./state.js').ImageEntry} img
+ * @param {number} idx
+ * @returns {HTMLDivElement}
+ */
+function buildCard(img, idx) {
+  const card = document.createElement('div');
+  card.className = 'card' + (img.stage ? ' staged' : '');
+  card.dataset.idx = idx;
+
+  // サムネイル
+  const thumb = document.createElement('img');
+  thumb.src = thumbUrl(img.name);
+  thumb.alt = img.name;
+  thumb.loading = 'lazy';
+  card.appendChild(thumb);
+
+  // フッター
+  const footer = document.createElement('div');
+  footer.className = 'card-footer';
+
+  const original = document.createElement('div');
+  original.className = 'card-original';
+  original.textContent = img.name;   // ← textContent で XSS 防止
+  footer.appendChild(original);
+
+  if (img.stage) {
+    const preview = document.createElement('div');
+    preview.className = 'card-preview';
+    preview.textContent = `→ ${img.stage.previewName}`;
+    footer.appendChild(preview);
+
+    const badge = document.createElement('div');
+    badge.className = 'card-badge staged';
+    badge.textContent = img.stage.n;
+    card.appendChild(badge);
+  }
+
+  card.appendChild(footer);
+  return card;
+}
+
+// ─── サイドバー チップ ──────────────────────────────────────────────────────────
+
+/**
+ * @param {(prefix: string) => void} onChipClick
+ */
+export function renderGroupChips(onChipClick) {
+  const container = document.getElementById('group-chips');
+
+  const allPrefixes = new Set([
+    ...Object.keys(committedGroups),
+    ...images.filter(img => img.stage).map(img => img.stage.prefix),
+  ]);
+
+  container.innerHTML = '';
+
+  for (const p of allPrefixes) {
+    const stagedCount = images.filter(img => img.stage?.prefix === p).length;
+
+    const chip = document.createElement('div');
+    chip.className = 'group-chip' + (p === currentPrefix ? ' active' : '');
+
+    const nameSpan = document.createElement('span');
+    nameSpan.textContent = p;
+
+    const countSpan = document.createElement('span');
+    countSpan.className = 'chip-count';
+    countSpan.textContent = stagedCount;
+
+    chip.appendChild(nameSpan);
+    chip.appendChild(countSpan);
+    chip.addEventListener('click', () => onChipClick(p));
+    container.appendChild(chip);
+  }
+}
+
+// ─── ステータスバー ─────────────────────────────────────────────────────────────
+
+export function updateStatus() {
+  const display = document.getElementById('current-group-display');
+  const count = document.getElementById('current-group-count');
+  const hint = document.getElementById('mode-hint');
+
+  if (currentPrefix) {
+    display.textContent = currentPrefix;
+    const staged = getStagedForCurrentPrefix();
+    count.textContent = `(仮選択 ${staged.length} 枚)`;
+
+    if (staged.length > 0) {
+      hint.innerHTML =
+        `<span>クリック</span>で追加 ／ <span>右クリック</span>で1枚取り消し ／ <span class="g">✓ 確定</span>でリネーム実行`;
+    } else {
+      hint.innerHTML = `<span>クリック</span>で画像を仮選択してください`;
+    }
+  } else {
+    display.textContent = '—';
+    count.textContent = '';
+    if (images.length > 0) {
+      hint.innerHTML =
+        `次にクリックした画像が<span>新グループの1枚目</span>になります`;
+    } else {
+      hint.textContent = 'フォルダを読み込んでください';
+    }
+  }
+
+  updateCommitButtons();
+}
+
+export function updateCommitButtons() {
+  const staged = currentPrefix ? getStagedForCurrentPrefix() : [];
+  const hasStaged = staged.length > 0;
+  document.getElementById('btn-commit').disabled = !hasStaged;
+  document.getElementById('btn-cancel-group').disabled = !hasStaged;
+}
+
+// ─── フォルダパス表示 ───────────────────────────────────────────────────────────
+
+export function setFolderDisplay(folder) {
+  document.getElementById('folder-path').textContent = folder;
+  document.getElementById('btn-reload').disabled = false;
+}
+
+// ─── トースト ──────────────────────────────────────────────────────────────────
+
+/** @param {string} msg @param {boolean} isError */
+export function toast(msg, isError = false) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (isError ? ' error' : '');
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+// ─── モーダル ──────────────────────────────────────────────────────────────────
+
+/** @param {() => void} onConfirm @param {() => void} onCancel */
+export function initModal(onConfirm, onCancel) {
+  document.getElementById('prefix-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') onConfirm();
+    if (e.key === 'Escape') onCancel();
+  });
+
+  document.getElementById('prefix-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('prefix-modal')) onCancel();
+  });
+
+  // ボタンは HTML 側で onclick を持たせるのではなく、ここで bind する
+  document.getElementById('btn-modal-confirm').addEventListener('click', onConfirm);
+  document.getElementById('btn-modal-cancel').addEventListener('click', onCancel);
+}
+
+/** @param {() => void} afterOpen */
+export function openModal(afterOpen) {
+  document.getElementById('prefix-modal').classList.add('open');
+  const input = document.getElementById('prefix-input');
+  input.value = '';
+  setTimeout(() => { input.focus(); afterOpen?.(); }, 50);
+}
+
+export function closeModal() {
+  document.getElementById('prefix-modal').classList.remove('open');
+}
+
+/** @returns {string} */
+export function getModalInputValue() {
+  return document.getElementById('prefix-input').value.trim();
+}
+</file>
+
+<file path="README.md">
+# Image Classifier
+
+画像を手動でカテゴライズしてリネームするローカルツール。
+
+---
+
+## セットアップ
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 起動
+
+```bash
+python server.py
+```
+
+起動したら `index.html` をブラウザで直接開く。
+
+---
+
+## 使いかた
+
+### 1. フォルダを読み込む
+
+上部の入力欄に作業フォルダのパスを入力して「読み込む」を押す。
+
+```
+例: C:\Users\name\Pictures\work
+```
+
+フォルダ内の画像がグリッド表示される。
+
+### 2. グループを作る（最初の1枚）
+
+未分類の画像をクリックすると、グループ名（プレフィックス）の入力を求められる。
+
+```
+例: cat と入力 → その画像が cat (1).jpg にリネームされる
+```
+
+### 3. 同じグループに追加していく
+
+グループ名が設定された状態で別の画像をクリックすると順番にリネームされる。
+
+```
+cat (2).jpg, cat (3).jpg ...
+```
+
+### 4. 別のグループを作る
+
+未分類の画像をクリックすれば再度グループ名を聞いてくる。別名を入力すれば新グループになる。
+
+上部のチップをクリックすることで既存グループに切り替えることもできる。
+
+### 5. 取り消し
+
+分類済みの画像を**右クリック**で取り消し。
+
+---
+
+## ポート変更
+
+```bash
+python server.py --port 8080
+```
+
+`index.html` 内の `const API = 'http://127.0.0.1:5000/api'` も合わせて変更する。
+</file>
+
+<file path="server.py">
+#!/usr/bin/env python3
+"""
+Image Classifier Server
+Usage: python server.py [--port 5000]
+"""
+
+import os
+import sys
+import argparse
+import threading
+import webbrowser
+from pathlib import Path
+from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask_cors import CORS
+
+BASE_DIR = Path(__file__).parent
+app = Flask(__name__)
+CORS(app)
+
+WORK_DIR: Path | None = None
+IMAGE_EXTENSIONS = frozenset({'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'})
+CACHE_FILE = BASE_DIR / '.last_folder'
+
+# ── ファイル名検証 ──────────────────────────────────────────────────────────────
+
+_INVALID_NAME_CHARS = frozenset(r'\/:*?"<>|')
+
+def is_image(path: Path) -> bool:
+    return path.suffix.lower() in IMAGE_EXTENSIONS
+
+def is_safe_filename(name: str) -> bool:
+    if not name or not name.strip():
+        return False
+    if name in ('.', '..'):
+        return False
+    if any(c in _INVALID_NAME_CHARS for c in name):
+        return False
+    if len(name.encode('utf-8')) > 255:
+        return False
+    return True
+
+def resolve_under_workdir(filename: str) -> 'Path | None':
+    if WORK_DIR is None:
+        return None
+    if not is_safe_filename(filename):
+        return None
+    if os.sep in filename or '/' in filename:
+        return None
+    candidate = (WORK_DIR / filename).resolve()
+    if candidate.parent != WORK_DIR.resolve():
+        return None
+    return candidate
+
+# ── キャッシュ ──────────────────────────────────────────────────────────────────
+
+def save_cache(folder: Path) -> None:
+    try:
+        CACHE_FILE.write_text(str(folder), encoding='utf-8')
+    except Exception:
+        pass
+
+def load_cache() -> 'str | None':
+    try:
+        p = CACHE_FILE.read_text(encoding='utf-8').strip()
+        if Path(p).is_dir():
+            return p
+    except Exception:
+        pass
+    return None
+
+# ── tkinter ダイアログ ──────────────────────────────────────────────────────────
+
+def _open_dialog(initial_dir: str, result: list) -> None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes('-topmost', True)
+        folder = filedialog.askdirectory(
+            title='Select work folder',
+            initialdir=initial_dir or str(Path.home()),
+        )
+        root.destroy()
+        result.append(folder if folder else None)
+    except Exception:
+        result.append(None)
+
+# ── フロントエンド配信 ──────────────────────────────────────────────────────────
+
+@app.route('/')
+def serve_index():
+    return send_from_directory(str(BASE_DIR), 'index.html')
+
+@app.route('/app.css')
+def serve_css():
+    return send_from_directory(str(BASE_DIR), 'app.css')
+
+@app.route('/js/<path:filename>')
+def serve_js(filename):
+    return send_from_directory(str(BASE_DIR / 'js'), filename)
+
+# ── API ────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/pick_folder', methods=['POST'])
+def pick_folder():
+    global WORK_DIR
+    initial = str(WORK_DIR) if WORK_DIR else (load_cache() or str(Path.home()))
+    result: list = []
+    t = threading.Thread(target=_open_dialog, args=(initial, result))
+    t.start()
+    t.join(timeout=60)
+
+    if not result or result[0] is None:
+        return jsonify({'ok': False, 'error': 'cancelled'})
+
+    p = Path(result[0]).resolve()
+    if not p.is_dir():
+        return jsonify({'ok': False, 'error': 'folder not found'}), 400
+
+    WORK_DIR = p
+    save_cache(p)
+    return jsonify({'ok': True, 'folder': str(p)})
+
+
+@app.route('/api/last_folder', methods=['GET'])
+def last_folder():
+    cached = load_cache()
+    if cached:
+        return jsonify({'ok': True, 'folder': cached})
+    return jsonify({'ok': False, 'folder': None})
+
+
+@app.route('/api/set_folder', methods=['POST'])
+def set_folder():
+    global WORK_DIR
+    data = request.get_json(silent=True) or {}
+    folder = str(data.get('folder', '')).strip()
+    if not folder:
+        return jsonify({'ok': False, 'error': 'empty path'}), 400
+
+    p = Path(folder).resolve()
+    if not p.exists() or not p.is_dir():
+        return jsonify({'ok': False, 'error': 'folder not found'}), 400
+
+    WORK_DIR = p
+    save_cache(p)
+    return jsonify({'ok': True, 'folder': str(p)})
+
+
+@app.route('/api/images', methods=['GET'])
+def list_images():
+    if WORK_DIR is None:
+        return jsonify({'ok': False, 'error': 'no folder set'}), 400
+
+    images = sorted(
+        [f.name for f in WORK_DIR.iterdir() if f.is_file() and is_image(f)],
+        key=lambda x: x.lower(),
+    )
+    return jsonify({'ok': True, 'images': images})
+
+
+@app.route('/api/thumb/<path:filename>', methods=['GET'])
+def serve_image(filename: str):
+    if WORK_DIR is None:
+        return jsonify({'error': 'no folder set'}), 400
+
+    file_path = resolve_under_workdir(filename)
+    if file_path is None:
+        return jsonify({'error': 'invalid path'}), 403
+    if not file_path.exists():
+        return jsonify({'error': 'file not found'}), 404
+    if not is_image(file_path):
+        return jsonify({'error': 'not an image'}), 400
+
+    return send_file(str(file_path))
+
+
+@app.route('/api/rename', methods=['POST'])
+def rename_file():
+    if WORK_DIR is None:
+        return jsonify({'ok': False, 'error': 'no folder set'}), 400
+
+    data = request.get_json(silent=True) or {}
+    old_name = str(data.get('old', '')).strip()
+    new_name = str(data.get('new', '')).strip()
+
+    if not old_name or not new_name:
+        return jsonify({'ok': False, 'error': 'empty filename'}), 400
+
+    old_path = resolve_under_workdir(old_name)
+    new_path = resolve_under_workdir(new_name)
+
+    if old_path is None or new_path is None:
+        return jsonify({'ok': False, 'error': 'invalid path'}), 403
+    if not old_path.exists():
+        return jsonify({'ok': False, 'error': f'{old_name} not found'}), 404
+    if new_path.exists():
+        return jsonify({'ok': False, 'error': f'{new_name} already exists'}), 409
+
+    try:
+        old_path.rename(new_path)
+        return jsonify({'ok': True, 'old': old_name, 'new': new_name})
+    except OSError as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+# ── エントリポイント ────────────────────────────────────────────────────────────
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Image Classifier Server')
+    parser.add_argument('--port', type=int, default=5000)
+    args = parser.parse_args()
+
+    print('======================================')
+    print('  Image Classifier')
+    print(f'  http://127.0.0.1:{args.port}')
+    print('  Ctrl+C to stop')
+    print('======================================')
+
+    url = f'http://127.0.0.1:{args.port}'
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+    app.run(host='127.0.0.1', port=args.port, debug=False)
+</file>

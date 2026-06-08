@@ -1,0 +1,5255 @@
+<tree>
+clipnote_v2/
+  .wrangler/
+    cache/
+      wrangler-account.json
+    tmp/
+  client/
+    app.js
+    icon-192.png
+    icon-512.png
+    index.html
+    manifest.json
+    style.css
+  server/
+    .wrangler/
+      cache/
+        pages.json
+        wrangler-account.json
+      tmp/
+    src/
+      index.js
+      room.js
+    package-lock.json
+    package.json
+    wrangler.toml
+  wrangler.jsonc
+</tree>
+
+<file path=".wrangler/cache/wrangler-account.json">
+{
+  "account": {
+    "id": "caa8579c6ef66143854aaf031dc305f5",
+    "name": "Amamisa4@gmail.com's Account"
+  }
+}
+</file>
+
+<file path="client/app.js">
+// ===== utils =====
+function uid() {
+    // [fix #8] crypto.randomUUID() で衝突リスクを排除
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+}
+
+function fmtShort(iso) {
+    try {
+        const d = new Date(iso), now = new Date();
+        const hh = String(d.getHours()).padStart(2, '0'), mi = String(d.getMinutes()).padStart(2, '0');
+        if (d.toDateString() === now.toDateString()) return hh + ':' + mi;
+        return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') + ' ' + hh + ':' + mi;
+    } catch { return ''; }
+}
+
+function fmtFull(iso) {
+    try {
+        const d = new Date(iso);
+        return d.getFullYear() + '/' +
+            String(d.getMonth() + 1).padStart(2, '0') + '/' +
+            String(d.getDate()).padStart(2, '0') + ' ' +
+            String(d.getHours()).padStart(2, '0') + ':' +
+            String(d.getMinutes()).padStart(2, '0');
+    } catch { return ''; }
+}
+
+function fmtDateTime(iso) {
+    return fmtFull(iso);
+}
+
+function esc(s) {
+    return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function newerIso(a, b) {
+    return new Date(a || 0).getTime() >= new Date(b || 0).getTime();
+}
+
+function mergeBlocks(existingBlocks = [], incomingBlocks = []) {
+    const byId = new Map(existingBlocks.map(b => [b.id, b]));
+    for (const incoming of incomingBlocks) {
+        const current = byId.get(incoming.id);
+        if (!current) {
+            byId.set(incoming.id, incoming);
+            continue;
+        }
+        const next = { ...current };
+        if (newerIso(incoming.updatedAt, current.updatedAt)) Object.assign(next, incoming);
+        else {
+            if ('groupId' in incoming) next.groupId = incoming.groupId;
+            if ('groupOrder' in incoming) next.groupOrder = incoming.groupOrder;
+        }
+        byId.set(incoming.id, next);
+    }
+    return Array.from(byId.values());
+}
+
+// ===== Store =====
+const Store = {
+    get: k => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+    set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
+    remove: k => localStorage.removeItem(k)
+};
+
+// ===== State =====
+let state = {
+    notes: [],
+    currentNoteId: null,
+    settings: Store.get('cn_settings') || { url: '', key: '', room: '' },
+    ui: { blockFont: 13.5, groupFont: 22 },
+    sortMode: false,
+    clientId: uid(),
+    syncSeq: 0
+};
+
+// ===== Apply UI settings =====
+function applyUiSettings() {
+    const root = document.documentElement;
+    root.style.setProperty('--block-font-size', state.ui.blockFont + 'px');
+    root.style.setProperty('--group-font-size', state.ui.groupFont + 'px');
+}
+
+// ===== Alias =====
+// エイリアスのキー形式: 大文字アルファベット + 数字 (例: H1, P2, IMG3)
+const ALIAS_RE = /\b([A-Z]+[0-9]+)\b/g;
+
+const AliasStore = {
+    load() {
+        return Store.get('cn_aliases') || [];
+    },
+    save(list) {
+        Store.set('cn_aliases', list);
+    }
+};
+
+let aliases = AliasStore.load(); // [{ key: 'H1', text: '笑顔にして' }, ...]
+
+function aliasMap() {
+    const m = new Map();
+    for (const a of aliases) m.set(a.key, a.text);
+    return m;
+}
+
+// プレーンテキストへの展開（コピー用）
+function expandAliases(text) {
+    const m = aliasMap();
+    return text.replace(ALIAS_RE, (match) => m.has(match) ? m.get(match) : match);
+}
+
+// HTML表示用: エイリアス部分を色付きバッジに変換、未定義は赤バッジ
+function renderAliasedHTML(text) {
+    const m = aliasMap();
+    // テキストをエスケープしつつエイリアスだけバッジ化
+    // ALIAS_REはglobalなのでlastIndexをリセット
+    ALIAS_RE.lastIndex = 0;
+    const parts = [];
+    let last = 0;
+    let match;
+    const re = new RegExp(ALIAS_RE.source, 'g');
+    while ((match = re.exec(text)) !== null) {
+        // マッチ前の通常テキスト
+        if (match.index > last) {
+            parts.push(esc(text.slice(last, match.index)));
+        }
+        const key = match[1];
+        if (m.has(key)) {
+            parts.push('<span class="alias-badge alias-badge--defined" title="' + esc(key) + '">' + esc(m.get(key)) + '</span>');
+        } else {
+            parts.push('<span class="alias-badge alias-badge--undefined" title="未定義のエイリアス">' + esc(key) + '</span>');
+        }
+        last = match.index + match[0].length;
+    }
+    if (last < text.length) parts.push(esc(text.slice(last)));
+    return parts.join('');
+}
+
+// ===== WebSocket =====
+const WS = (() => {
+    let ws = null, pingT = null, reconnT = null, watchdogT = null, closed = false, authed = false;
+    let lastPongAt = 0;
+    const PING_INTERVAL = 20000;   // 20秒ごとにping（DOの30秒タイムアウト前に送る）
+    const PONG_TIMEOUT = 10000;   // pong が10秒来なければ死亡と判断
+    const pending = new Map();
+
+    function _clearTimers() {
+        clearInterval(pingT);
+        clearInterval(watchdogT);
+        clearTimeout(reconnT);
+        pingT = watchdogT = reconnT = null;
+    }
+
+    function _forceReconnect() {
+        // WSが静かに死んでいる場合の強制再接続
+        if (closed) return;
+        console.warn('[WS] pong timeout — force reconnect');
+        authed = false;
+        _clearTimers();
+        if (ws) { try { ws.close(); } catch { } ws = null; }
+        setStatus('offline');
+        reconnT = setTimeout(connect, 500);
+    }
+
+    function connect() {
+        if (closed) return;
+        const { url, key, room } = state.settings;
+        if (!url || !room) return;
+        try {
+            // [fix #1] ?key= をURLから除去。認証は接続後の auth メッセージのみで行う
+            ws = new WebSocket(
+                url.replace(/^http/, 'ws') + '/ws/' + encodeURIComponent(room)
+            );
+        } catch { return; }
+
+        ws.onopen = () => {
+            // サーバーは接続後に auth メッセージで認証する仕様
+            ws.send(JSON.stringify({ type: 'auth', key }));
+            authed = false;
+            setStatus('syncing');
+        };
+        ws.onmessage = e => {
+            try {
+                const m = JSON.parse(e.data);
+                if (m.type === 'pong') {
+                    lastPongAt = Date.now(); // pong 受信時刻を更新
+                    return;
+                }
+                if (m.type === 'auth_ok') {
+                    authed = true;
+                    lastPongAt = Date.now();
+                    setStatus(pending.size ? 'syncing' : 'online');
+                    flushPending();
+                    if (pending.size === 0) loadFromServer();
+                    _clearTimers();
+
+                    // ping を定期送信
+                    pingT = setInterval(() => {
+                        if (ws && ws.readyState === 1 && authed) {
+                            ws.send(JSON.stringify({ type: 'ping' }));
+                        }
+                    }, PING_INTERVAL);
+
+                    // watchdog: pong が PONG_TIMEOUT 以上来なければ強制再接続
+                    watchdogT = setInterval(() => {
+                        if (Date.now() - lastPongAt > PING_INTERVAL + PONG_TIMEOUT) {
+                            _forceReconnect();
+                        }
+                    }, PING_INTERVAL + PONG_TIMEOUT);
+
+                    return;
+                }
+                if (m.type === 'auth_error') { setStatus('error'); return; }
+                if (m.type === 'sync_error') { setStatus('error'); console.warn('sync error', m); return; }
+                if (m.type === 'sync') {
+                    if (m.clientId === state.clientId && m.clientMsgId) {
+                        pending.delete(m.clientMsgId);
+                        setStatus(pending.size ? 'syncing' : 'online');
+                    }
+                    applySync(m, true);
+                }
+            } catch { }
+        };
+        ws.onclose = () => {
+            authed = false;
+            _clearTimers();
+            setStatus('offline');
+            if (!closed) reconnT = setTimeout(connect, 1500);
+        };
+        ws.onerror = () => setStatus('error');
+    }
+
+    // PCのスリープ復帰・タブ復帰時に即再接続
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && !closed) {
+            const alive = ws && ws.readyState === 1 && authed
+                && Date.now() - lastPongAt < PING_INTERVAL + PONG_TIMEOUT;
+            if (!alive) {
+                console.log('[WS] visibility restored — reconnecting');
+                _forceReconnect();
+            }
+        }
+    });
+
+    function prepare(m) {
+        if (m.type !== 'sync') return m;
+        if (!m.clientId) m.clientId = state.clientId;
+        if (!m.clientMsgId) m.clientMsgId = uid();
+        if (!m.clientSeq) m.clientSeq = ++state.syncSeq;
+        pending.set(m.clientMsgId, m);
+        setStatus('syncing');
+        return m;
+    }
+
+    function transmit(m) {
+        try {
+            if (ws && ws.readyState === 1 && authed) ws.send(JSON.stringify(m));
+        } catch {
+            setStatus('error');
+        }
+    }
+
+    function flushPending() {
+        if (!authed) return;
+        pending.forEach(m => transmit(m));
+    }
+
+    function send(m) {
+        m = prepare(m);
+        if (m.type !== 'sync') { transmit(m); return; }
+        if (authed) transmit(m);
+    }
+    function disconnect() { closed = true; authed = false; _clearTimers(); if (ws) ws.close(); }
+    function reset() { closed = false; disconnect(); closed = false; setTimeout(connect, 300); }
+
+    function ensureConnected() {
+        if (closed) return;
+        const alive = ws && ws.readyState === 1 && authed
+            && Date.now() - lastPongAt < PING_INTERVAL + PONG_TIMEOUT;
+        if (!alive) _forceReconnect();
+    }
+
+    return { connect, send, disconnect, reset, ensureConnected };
+})();
+
+function setStatus(s) {
+    const d = document.getElementById('statusDot');
+    d.className = 'sidebar-status ' + (s === 'online' ? 'online' : s === 'error' ? 'error' : s === 'syncing' ? 'syncing' : '');
+    d.title = s === 'online' ? '接続中' : s === 'syncing' ? '同期中' : s === 'error' ? 'エラー' : '未接続';
+}
+
+function applySync(msg, fromRemote) {
+    const { action, payload } = msg;
+    if (action === 'note_upsert') {
+        const idx = state.notes.findIndex(n => n.id === payload.id);
+        if (idx >= 0) {
+            const existing = state.notes[idx];
+            if (!newerIso(payload.updatedAt, existing.updatedAt)) {
+                if (fromRemote) {
+                    const merged = { ...existing };
+                    if (payload.blocks) merged.blocks = mergeBlocks(existing.blocks, payload.blocks);
+                    state.notes[idx] = merged;
+                }
+            } else {
+                const merged = { ...payload };
+                if (payload.blocks && existing.blocks) merged.blocks = mergeBlocks(existing.blocks, payload.blocks);
+                state.notes[idx] = merged;
+            }
+        } else {
+            state.notes.push(payload);
+        }
+        sortNotes(); renderNoteList();
+        if (state.currentNoteId === payload.id) {
+            renderHeader();
+            if (!getActiveEditingBlockId()) renderBlocks();
+        }
+    } else if (action === 'note_delete') {
+        state.notes = state.notes.filter(n => n.id !== payload.id);
+        if (state.currentNoteId === payload.id) {
+            state.currentNoteId = state.notes[0]?.id || null;
+            renderAll();
+        } else { renderNoteList(); }
+    } else if (action === 'block_upsert') {
+        const note = state.notes.find(n => n.id === payload.noteId);
+        if (!note) return;
+        const idx = note.blocks.findIndex(b => b.id === payload.id);
+        if (idx >= 0) {
+            const cur = note.blocks[idx];
+            if (newerIso(payload.updatedAt, cur.updatedAt)) note.blocks[idx] = { ...cur, ...payload };
+            else {
+                if ('groupId' in payload) note.blocks[idx] = { ...cur, groupId: payload.groupId, groupOrder: payload.groupOrder };
+            }
+        } else { note.blocks.push(payload); }
+        if (newerIso(payload.noteUpdatedAt, note.updatedAt)) note.updatedAt = payload.noteUpdatedAt;
+        if (state.currentNoteId === payload.noteId) {
+            renderHeader();
+            const editingId = getActiveEditingBlockId();
+            syncActiveTextarea(note.blocks.find(b => b.id === payload.id), editingId === payload.id);
+            if (editingId !== payload.id) renderBlocks();
+        }
+        renderNoteList();
+    } else if (action === 'block_delete') {
+        const note = state.notes.find(n => n.id === payload.noteId);
+        if (!note) return;
+        note.blocks = note.blocks.filter(b => b.id !== payload.id);
+        if (newerIso(payload.noteUpdatedAt, note.updatedAt)) note.updatedAt = payload.noteUpdatedAt;
+        if (state.currentNoteId === payload.noteId) { renderHeader(); renderBlocks(); }
+        renderNoteList();
+    }
+}
+
+function dispatch(action, payload) {
+    const now = new Date().toISOString();
+    if (action === 'note_upsert') {
+        payload.updatedAt = payload.updatedAt || now;
+        applySync({ action, payload }, false);
+        WS.send({ type: 'sync', action, payload });
+    } else if (action === 'note_delete') {
+        applySync({ action, payload }, false);
+        WS.send({ type: 'sync', action, payload });
+    } else if (action === 'block_upsert') {
+        payload.createdAt = payload.createdAt || now;
+        payload.updatedAt = now;
+        payload.noteUpdatedAt = now;
+        applySync({ action, payload }, false);
+        WS.send({ type: 'sync', action, payload });
+    } else if (action === 'block_delete') {
+        payload.noteUpdatedAt = now;
+        applySync({ action, payload }, false);
+        WS.send({ type: 'sync', action, payload });
+    }
+}
+
+function persist() { }
+function loadLocal() { Store.remove('cn_notes'); Store.remove('cn_ui'); }
+
+async function loadFromServer() {
+    const { url, key, room } = state.settings; if (!url || !room) return;
+    try {
+        const r = await fetch(url + '/notes/' + encodeURIComponent(room), { headers: { 'x-api-key': key } });
+        if (!r.ok) return;
+        const data = await r.json();
+        for (const n of (data.notes || [])) applySync({ action: 'note_upsert', payload: n }, true);
+        sortNotes(); renderAll();
+    } catch { }
+}
+
+function sortNotes() {
+    state.notes.sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0);
+    });
+}
+
+function currentNote() { return state.notes.find(n => n.id === state.currentNoteId) || null; }
+
+function getItemOrder(note) {
+    if (note.itemOrder && note.itemOrder.length > 0) return note.itemOrder;
+    const pinned = (note.blocks || []).filter(b => b.pinned && !b.groupId).map(b => ({ type: 'block', id: b.id }));
+    const groups = (note.groups || []).map(g => ({ type: 'group', id: g.id }));
+    const ungrouped = (note.blocks || []).filter(b => !b.pinned && !b.groupId).map(b => ({ type: 'block', id: b.id }));
+    return [...pinned, ...groups, ...ungrouped];
+}
+
+function getGroupBlocks(note, groupId) {
+    return (note.blocks || [])
+        .filter(b => b.groupId === groupId)
+        .sort((a, b) => (a.groupOrder ?? 0) - (b.groupOrder ?? 0));
+}
+
+function renderNoteList() {
+    const q = (document.getElementById('searchInput').value || '').toLowerCase();
+    const el = document.getElementById('noteList');
+    el.innerHTML = '';
+    for (const n of state.notes) {
+        const title = n.title || '無題のメモ';
+        if (q && !title.toLowerCase().includes(q) && !(n.blocks || []).some(b => b.text.toLowerCase().includes(q))) continue;
+        const d = document.createElement('div');
+        d.className = 'note-item' + (n.id === state.currentNoteId ? ' active' : '') + (n.pinned ? ' pinned' : '');
+        d.innerHTML = '<div class="note-item-title">' + (n.pinned ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11"><path d="M12 17v5M9 3h6l1 7H8L9 3zM8 10l-2 7h12l-2-7"/></svg>' : '') + esc(title) + '</div>' +
+            '<div class="note-item-meta">' + fmtShort(n.updatedAt) + ' · ' + (n.blocks || []).length + 'ブロック</div>';
+        d.addEventListener('click', () => { state.currentNoteId = n.id; renderAll(); App.hideSidebar(); });
+        el.appendChild(d);
+    }
+}
+
+function renderHeader() {
+    const n = currentNote();
+    const titleInput = document.getElementById('noteTitleInput');
+    const updated = document.getElementById('noteUpdated');
+    const addBar = document.getElementById('addBar');
+    const pinBtn = document.getElementById('notePinBtn');
+    if (!n) {
+        titleInput.value = ''; titleInput.disabled = true;
+        updated.textContent = '';
+        addBar.style.display = 'none';
+        pinBtn.classList.remove('active');
+        return;
+    }
+    titleInput.disabled = false;
+    if (document.activeElement !== titleInput) titleInput.value = n.title || '';
+    updated.textContent = fmtDateTime(n.updatedAt);
+    addBar.style.display = 'flex';
+    pinBtn.classList.toggle('active', !!n.pinned);
+}
+
+function renderBlocks() {
+    const note = currentNote();
+    const area = document.getElementById('blocksArea');
+    if (!note) {
+        area.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>メモを選択するか、新しく作成してください</div>';
+        return;
+    }
+    if (state.sortMode) { initSortDrag(area, note); return; }
+    area.innerHTML = '';
+    const order = getItemOrder(note);
+    for (const item of order) {
+        if (item.type === 'block') {
+            const b = (note.blocks || []).find(bl => bl.id === item.id);
+            if (b) area.appendChild(makeBlockEl(b, note));
+        } else if (item.type === 'group') {
+            const g = (note.groups || []).find(gr => gr.id === item.id);
+            if (g) {
+                const gblocks = getGroupBlocks(note, g.id);
+                area.appendChild(makeGroupEl(g, gblocks, note));
+            }
+        }
+    }
+    if (!state.sortMode) initDragDrop(area, note);
+}
+
+function makeGroupEl(g, blocks, note) {
+    const el = document.createElement('div');
+    el.className = 'block-group';
+    el.dataset.id = g.id;
+    el.dataset.type = 'group';
+
+    const header = document.createElement('div');
+    header.className = 'group-header';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'group-title';
+    titleEl.textContent = g.title || 'グループ';
+    titleEl.contentEditable = 'false';
+
+    function saveTitle() {
+        const newTitle = titleEl.textContent.trim() || 'グループ';
+        titleEl.contentEditable = 'false';
+        const n = currentNote(); if (!n) return;
+        const updated = { ...n, groups: n.groups.map(gr => gr.id === g.id ? { ...gr, title: newTitle } : gr), updatedAt: new Date().toISOString() };
+        state.notes = state.notes.map(no => no.id === n.id ? updated : no);
+        persist(); renderHeader(); renderNoteList(); WS.send({ type: 'sync', action: 'note_upsert', payload: updated });
+    }
+
+    titleEl.addEventListener('dblclick', () => {
+        titleEl.contentEditable = 'true'; titleEl.focus();
+        const range = document.createRange(); range.selectNodeContents(titleEl);
+        window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+    });
+    titleEl.addEventListener('blur', saveTitle);
+    titleEl.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); } });
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'group-del-btn';
+    delBtn.title = 'グループを解除';
+    delBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+    delBtn.addEventListener('click', () => {
+        const n = currentNote(); if (!n) return;
+        const newBlocks = n.blocks.map(b => b.groupId === g.id ? { ...b, groupId: null, groupOrder: null } : b);
+        const newGroups = (n.groups || []).filter(gr => gr.id !== g.id);
+        const newOrder = getItemOrder(n)
+            .filter(it => !(it.type === 'group' && it.id === g.id))
+            .concat(blocks.map(b => ({ type: 'block', id: b.id })));
+        const updated = { ...n, blocks: newBlocks, groups: newGroups, itemOrder: newOrder, updatedAt: new Date().toISOString() };
+        state.notes = state.notes.map(no => no.id === n.id ? updated : no);
+        persist(); renderHeader(); renderBlocks(); renderNoteList(); WS.send({ type: 'sync', action: 'note_upsert', payload: updated });
+    });
+
+    header.appendChild(titleEl);
+    header.appendChild(delBtn);
+    el.appendChild(header);
+
+    const inner = document.createElement('div');
+    inner.className = 'group-inner';
+    inner.dataset.groupId = g.id;
+
+    for (const b of blocks) inner.appendChild(makeBlockEl(b, note));
+
+    // グループ内ブロック追加
+    const addRow = document.createElement('div');
+    addRow.className = 'group-add-row';
+    const ta = document.createElement('textarea');
+    ta.className = 'group-add-ta'; ta.rows = 1; ta.placeholder = 'グループに追加...';
+    ta.addEventListener('input', function () {
+        this.style.height = '32px'; this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+    });
+
+    function doAdd() {
+        const text = ta.value.trim(); if (!text) return;
+        const n = currentNote(); if (!n) return;
+        const now = new Date().toISOString();
+        const maxOrder = Math.max(0, ...blocks.map(b => b.groupOrder ?? 0));
+        const block = { id: uid(), noteId: n.id, text, pinned: false, createdAt: now, groupId: g.id, groupOrder: maxOrder + 1 };
+        const { blocks: _, ...noteWithoutBlocks } = { ...n, updatedAt: now };
+        dispatch('block_upsert', block);
+        dispatch('note_upsert', noteWithoutBlocks);
+        ta.value = ''; ta.style.height = '32px';
+    }
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAdd(); } });
+    const addBtn = document.createElement('button');
+    addBtn.className = 'group-add-btn';
+    addBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>';
+    addBtn.addEventListener('click', doAdd);
+    addRow.appendChild(ta); addRow.appendChild(addBtn);
+
+    inner.appendChild(addRow);
+    el.appendChild(inner);
+    if (!state.sortMode) initDragDrop(inner, note);
+    return el;
+}
+
+function makeBlockEl(b, note) {
+    const card = document.createElement('div');
+    card.className = 'block-card' + (b.pinned ? ' pinned' : '');
+    card.dataset.id = b.id;
+    card.dataset.type = 'block';
+    card.draggable = false;
+
+    const groups = note.groups || [];
+    const pinCls = 'block-act' + (b.pinned ? ' pin-on' : '');
+    const pinLbl = b.pinned ? 'ピン留めを外す' : 'ピン留め';
+    const grpCls = 'block-act' + (b.groupId ? ' grp-on' : '');
+    const pickerItems = groups.map(g =>
+        '<div class="grp-picker-item' + (b.groupId === g.id ? ' cur' : '') + '" data-gid="' + g.id + '">' + esc(g.title || 'グループ') + '</div>'
+    ).join('');
+
+    // ブロック表示テキスト: エイリアスをバッジに展開
+    const displayHTML = renderAliasedHTML(b.text);
+
+    card.innerHTML =
+        '<div class="sort-handle" title="ドラッグで並び替え">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="8" x2="21" y2="8"/><line x1="3" y1="16" x2="21" y2="16"/></svg>' +
+        '</div>' +
+        '<div class="block-header">' +
+        '<div class="block-time">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>' +
+        fmtDateTime(b.createdAt) +
+        '</div>' +
+        '<div class="block-actions">' +
+        '<button class="' + grpCls + ' grp-btn" title="グループ">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="8" height="8" rx="1"/><rect x="14" y="3" width="8" height="8" rx="1"/><rect x="2" y="13" width="8" height="8" rx="1"/><rect x="14" y="13" width="8" height="8" rx="1"/></svg>' +
+        '</button>' +
+        '<div class="grp-picker" id="gp-' + b.id + '">' +
+        pickerItems +
+        (groups.length ? '<div class="grp-picker-sep"></div>' : '') +
+        '<div class="grp-picker-new" data-new="1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新しいグループ</div>' +
+        '</div>' +
+        '<button class="' + pinCls + ' pin-btn" title="' + pinLbl + '">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17v5M9 3h6l1 7H8L9 3zM8 10l-2 7h12l-2-7"/></svg>' +
+        '</button>' +
+        '<button class="block-act edit-btn" title="編集">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>' +
+        '</button>' +
+        '<button class="block-act del-btn" title="削除">' +
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>' +
+        '</button>' +
+        '</div>' +
+        '</div>' +
+        '<div class="block-text-wrap"><div class="block-text">' + displayHTML + '</div></div>' +
+        '<div class="block-edit-wrap">' +
+        '<textarea class="block-edit-ta"></textarea>' +
+        '<div class="block-edit-actions"><button class="edit-cancel-btn">キャンセル</button><button class="edit-save-btn">保存</button></div>' +
+        '</div>' +
+        '<div class="copy-badge" id="cb-' + b.id + '">コピーしました</div>';
+
+    // copy: エイリアス展開済みテキストをクリップボードへ
+    card.querySelector('.block-text').addEventListener('click', () => { if (!state.sortMode) copyBlock(b, card); });
+
+    // pin
+    card.querySelector('.pin-btn').addEventListener('click', e => {
+        e.stopPropagation();
+        dispatch('block_upsert', { ...b, noteId: note.id, pinned: !b.pinned });
+    });
+
+    // group picker
+    const grpBtn = card.querySelector('.grp-btn');
+    const picker = card.querySelector('#gp-' + b.id);
+    grpBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        document.querySelectorAll('.grp-picker.open').forEach(p => { if (p !== picker) p.classList.remove('open'); });
+        picker.classList.toggle('open');
+    });
+    picker.addEventListener('click', e => {
+        e.stopPropagation();
+        const item = e.target.closest('[data-gid]');
+        const isNew = e.target.closest('[data-new]');
+        const n = currentNote(); if (!n) return;
+
+        if (isNew) {
+            const title = prompt('グループ名を入力してください', '新しいグループ');
+            if (!title) return;
+            const gid = uid();
+            const curOrder = getItemOrder(n);
+            const blockIdx = curOrder.findIndex(it => it.type === 'block' && it.id === b.id);
+            const newOrder = [...curOrder];
+            if (blockIdx >= 0) newOrder.splice(blockIdx, 1, { type: 'group', id: gid });
+            else newOrder.push({ type: 'group', id: gid });
+            const newBlocks = n.blocks.map(bl => bl.id === b.id ? { ...bl, groupId: gid, groupOrder: 0 } : bl);
+            const updated = { ...n, blocks: newBlocks, groups: [...(n.groups || []), { id: gid, title }], itemOrder: newOrder, updatedAt: new Date().toISOString() };
+            state.notes = state.notes.map(no => no.id === n.id ? updated : no);
+            persist(); renderHeader(); renderBlocks(); renderNoteList(); WS.send({ type: 'sync', action: 'note_upsert', payload: updated });
+
+        } else if (item) {
+            const gid = item.dataset.gid;
+            const newGid = b.groupId === gid ? null : gid;
+            let curOrder = getItemOrder(n);
+            if (newGid === null) {
+                const grpIdx = curOrder.findIndex(it => it.type === 'group' && it.id === b.groupId);
+                curOrder = curOrder.filter(it => !(it.type === 'block' && it.id === b.id));
+                if (grpIdx >= 0) curOrder.splice(grpIdx, 0, { type: 'block', id: b.id });
+                else curOrder.push({ type: 'block', id: b.id });
+            } else {
+                curOrder = curOrder.filter(it => !(it.type === 'block' && it.id === b.id));
+            }
+            const newBlocks = n.blocks.map(bl => bl.id === b.id ? { ...bl, groupId: newGid, groupOrder: newGid ? Date.now() : bl.groupOrder } : bl);
+            const updated = { ...n, blocks: newBlocks, itemOrder: curOrder, updatedAt: new Date().toISOString() };
+            state.notes = state.notes.map(no => no.id === n.id ? updated : no);
+            persist(); renderHeader(); renderBlocks(); renderNoteList(); WS.send({ type: 'sync', action: 'note_upsert', payload: updated });
+        }
+        picker.classList.remove('open');
+    });
+
+    // edit
+    const editBtn = card.querySelector('.edit-btn');
+    const tw = card.querySelector('.block-text-wrap');
+    const ew = card.querySelector('.block-edit-wrap');
+    const ta = card.querySelector('.block-edit-ta');
+    editBtn.addEventListener('click', e => {
+        e.stopPropagation(); ta.value = b.text;
+        tw.classList.add('editing'); ew.classList.add('active');
+        ta.style.height = Math.max(ta.scrollHeight, 60) + 'px'; ta.focus();
+    });
+    ta.addEventListener('input', function () {
+        this.style.height = 'auto';
+        this.style.height = this.scrollHeight + 'px';
+        dispatch('block_upsert', { ...b, noteId: note.id, text: ta.value });
+    });
+    card.querySelector('.edit-cancel-btn').addEventListener('click', () => {
+        tw.classList.remove('editing'); ew.classList.remove('active'); renderBlocks();
+    });
+    card.querySelector('.edit-save-btn').addEventListener('click', () => {
+        tw.classList.remove('editing'); ew.classList.remove('active'); renderBlocks();
+    });
+
+    // delete
+    card.querySelector('.del-btn').addEventListener('click', e => {
+        e.stopPropagation();
+        if (!confirm('このブロックを削除しますか？')) return;
+        dispatch('block_delete', { id: b.id, noteId: note.id });
+    });
+
+    return card;
+}
+
+document.addEventListener('click', () =>
+    document.querySelectorAll('.grp-picker.open').forEach(p => p.classList.remove('open'))
+);
+
+// ===== FLIP animation helper =====
+function flipAnimate(area, fn) {
+    // First: 現在位置を記録
+    const rects = new Map();
+    area.querySelectorAll(':scope > .block-card, :scope > .block-group').forEach(el => {
+        rects.set(el.dataset.id, el.getBoundingClientRect());
+    });
+
+    fn(); // DOM更新（renderBlocks を含む）
+
+    // Last: 新位置を取得し、差分でアニメーション
+    area.querySelectorAll(':scope > .block-card, :scope > .block-group').forEach(el => {
+        const old = rects.get(el.dataset.id);
+        if (!old) return;
+        const now = el.getBoundingClientRect();
+        const dy = old.top - now.top;
+        if (Math.abs(dy) < 1) return;
+        el.style.transform = `translateY(${dy}px)`;
+        el.style.transition = 'none';
+        requestAnimationFrame(() => {
+            el.style.transition = 'transform .22s ease';
+            el.style.transform = '';
+            el.addEventListener('transitionend', () => { el.style.transition = ''; }, { once: true });
+        });
+    });
+}
+
+function getOrCreateIndicator() {
+    let ind = document.getElementById('drop-indicator');
+    if (!ind) {
+        ind = document.createElement('div');
+        ind.id = 'drop-indicator';
+        ind.className = 'drop-indicator';
+        document.body.appendChild(ind);
+    }
+    return ind;
+}
+
+function showIndicator(targetEl, before) {
+    const ind = getOrCreateIndicator();
+    const rect = targetEl.getBoundingClientRect();
+    const scrollY = window.scrollY || document.documentElement.scrollTop;
+    ind.style.top = (before ? rect.top : rect.bottom) + scrollY - 1.5 + 'px';
+    ind.style.left = rect.left + 'px';
+    ind.style.width = rect.width + 'px';
+    ind.style.display = 'block';
+}
+
+function hideIndicator() {
+    const ind = document.getElementById('drop-indicator');
+    if (ind) ind.style.display = 'none';
+}
+
+function initDragDrop(area, note) {
+    let dragId = null, dragType = null, overEl = null, overBefore = false;
+
+    area.querySelectorAll(':scope > .block-card, :scope > .block-group').forEach(el => {
+        el.setAttribute('draggable', 'false');
+    });
+
+    function getDragItems() {
+        return Array.from(area.querySelectorAll(':scope > .block-card, :scope > .block-group'));
+    }
+
+    function onDragStart(e, el) {
+        dragId = el.dataset.id; dragType = el.dataset.type;
+        el.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+    }
+
+    function onDragOver(e, el) {
+        if (!dragId || el.dataset.id === dragId) return;
+        e.preventDefault();
+        const rect = el.getBoundingClientRect();
+        overBefore = e.clientY < rect.top + rect.height / 2;
+        overEl = el;
+        showIndicator(el, overBefore);
+    }
+
+    function onDrop(e) {
+        e.preventDefault();
+        hideIndicator();
+        if (!dragId || !overEl || overEl.dataset.id === dragId) { cleanup(); return; }
+        const toId = overEl.dataset.id;
+        const toType = overEl.dataset.type;
+        flipAnimate(area, () => applyTopLevelReorder(note, dragId, dragType, toId, toType, overBefore));
+        cleanup();
+    }
+
+    function cleanup() {
+        area.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+        hideIndicator(); dragId = dragType = overEl = null;
+    }
+
+    getDragItems().forEach(el => {
+        const handle = el.querySelector('.sort-handle');
+        if (handle) {
+            handle.addEventListener('mousedown', () => el.setAttribute('draggable', 'true'));
+            handle.addEventListener('mouseup', () => el.setAttribute('draggable', 'false'));
+        }
+        el.addEventListener('dragstart', e => onDragStart(e, el));
+        el.addEventListener('dragover', e => onDragOver(e, el));
+        el.addEventListener('dragleave', () => { hideIndicator(); overEl = null; });
+        el.addEventListener('drop', onDrop);
+        el.addEventListener('dragend', cleanup);
+    });
+}
+
+function applyGroupBlockReorder(note, groupId, fromId, toId, before = false) {
+    const blocks = getGroupBlocks(note, groupId);
+    const fromIdx = blocks.findIndex(b => b.id === fromId);
+    const toIdx = blocks.findIndex(b => b.id === toId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const moved = blocks.splice(fromIdx, 1)[0];
+    const insertAt = before ? toIdx : toIdx + 1;
+    blocks.splice(insertAt > fromIdx ? insertAt - 1 : insertAt, 0, moved);
+    const newBlocks = note.blocks.map(b => {
+        const idx = blocks.findIndex(bl => bl.id === b.id);
+        return idx >= 0 ? { ...b, groupOrder: idx } : b;
+    });
+    const updated = { ...note, blocks: newBlocks, updatedAt: new Date().toISOString() };
+    state.notes = state.notes.map(n => n.id === note.id ? updated : n);
+    persist(); renderHeader(); renderBlocks(); renderNoteList(); WS.send({ type: 'sync', action: 'note_upsert', payload: updated });
+}
+
+function initSortDrag(area, note) {
+    area.innerHTML = '';
+    const order = getItemOrder(note);
+    for (const item of order) {
+        if (item.type === 'block') {
+            const b = (note.blocks || []).find(bl => bl.id === item.id);
+            if (b) area.appendChild(makeBlockEl(b, note));
+        } else if (item.type === 'group') {
+            const g = (note.groups || []).find(gr => gr.id === item.id);
+            if (g) {
+                const gblocks = getGroupBlocks(note, g.id);
+                area.appendChild(makeGroupEl(g, gblocks, note));
+            }
+        }
+    }
+
+    let dragId = null, dragType = null;
+
+    function getTopLevelEl(el) {
+        let cur = el;
+        while (cur && cur.parentElement !== area) cur = cur.parentElement;
+        return cur;
+    }
+
+    function startDrag(clientX, clientY, el, type) {
+        dragId = el.dataset.id; dragType = type;
+        el.classList.add('sort-dragging');
+    }
+
+    function moveDrag(clientX, clientY) {
+        if (!dragId) return;
+        const items = Array.from(area.querySelectorAll(':scope > .block-card, :scope > .block-group'));
+        let target = null, before = false;
+        for (const item of items) {
+            if (item.dataset.id === dragId) continue;
+            const rect = item.getBoundingClientRect();
+            if (clientY < rect.bottom) {
+                target = item;
+                before = clientY < rect.top + rect.height / 2;
+                break;
+            }
+        }
+        if (target) showIndicator(target, before);
+        else hideIndicator();
+    }
+
+    function endDrag() {
+        if (!dragId) return;
+        const ind = document.getElementById('drop-indicator');
+        hideIndicator();
+        const items = Array.from(area.querySelectorAll(':scope > .block-card, :scope > .block-group'));
+        let toId = null, before = false;
+        let minDist = Infinity;
+        for (const item of items) {
+            if (item.dataset.id === dragId) continue;
+            const rect = item.getBoundingClientRect();
+        }
+        // Find by indicator position
+        if (ind && ind.style.display !== 'none') {
+            const indTop = parseFloat(ind.style.top);
+            for (const item of items) {
+                if (item.dataset.id === dragId) continue;
+                const rect = item.getBoundingClientRect();
+                const scrollY = window.scrollY || document.documentElement.scrollTop;
+                const topDiff = Math.abs(rect.top + scrollY - 1.5 - indTop);
+                const botDiff = Math.abs(rect.bottom + scrollY - 1.5 - indTop);
+                if (topDiff < 5) { toId = item.dataset.id; before = true; break; }
+                if (botDiff < 5) { toId = item.dataset.id; before = false; break; }
+            }
+        }
+        area.querySelectorAll('.sort-dragging').forEach(el => el.classList.remove('sort-dragging'));
+        dragId = dragType = null;
+        if (toId) {
+            const toType = area.querySelector('[data-id="' + toId + '"]')?.dataset.type;
+            flipAnimate(area, () => applyTopLevelReorder(note, dragId, dragType, toId, toType, before));
+        }
+    }
+
+    function onTouchStart(e, el, type) {
+        e.preventDefault();
+        startDrag(e.touches[0].clientX, e.touches[0].clientY, el, type);
+    }
+    function onTouchMove(e) {
+        e.preventDefault();
+        moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+    }
+    function onTouchEnd() { endDrag(); }
+
+    function onMouseStart(e, el, type) {
+        if (e.button !== 0) return;
+        startDrag(e.clientX, e.clientY, el, type);
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseEnd, { once: true });
+    }
+    function onMouseMove(e) { moveDrag(e.clientX, e.clientY); }
+    function onMouseEnd() {
+        document.removeEventListener('mousemove', onMouseMove);
+        endDrag();
+    }
+
+    area.querySelectorAll(':scope > .block-card, :scope > .block-group').forEach(el => {
+        const type = el.dataset.type;
+        const handle = el.querySelector('.sort-handle');
+        if (handle) {
+            handle.addEventListener('touchstart', e => onTouchStart(e, el, type), { passive: false });
+            handle.addEventListener('mousedown', e => onMouseStart(e, el, type));
+        }
+        el.addEventListener('dragover', e => { e.preventDefault(); moveDrag(e.clientX, e.clientY); });
+        el.addEventListener('drop', e => { e.preventDefault(); endDrag(); });
+    });
+
+    area._sortCleanup = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        hideIndicator();
+    };
+}
+
+function applyTopLevelReorder(note, fromId, fromType, toId, toType, before = false) {
+    const order = getItemOrder(note);
+    const fromIdx = order.findIndex(it => it.id === fromId);
+    const toIdx = order.findIndex(it => it.id === toId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const moved = order.splice(fromIdx, 1)[0];
+    const insertAt = before ? toIdx : toIdx + 1;
+    order.splice(insertAt > fromIdx ? insertAt - 1 : insertAt, 0, moved);
+    const updated = { ...note, itemOrder: order, updatedAt: new Date().toISOString() };
+    state.notes = state.notes.map(n => n.id === note.id ? updated : n);
+    persist(); renderHeader(); renderBlocks(); renderNoteList(); WS.send({ type: 'sync', action: 'note_upsert', payload: updated });
+}
+
+function copyBlock(b, card) {
+    // エイリアスを展開してコピー
+    const expanded = expandAliases(b.text);
+    navigator.clipboard.writeText(expanded).catch(() => { });
+    card.classList.add('flash-copy');
+    const badge = document.getElementById('cb-' + b.id);
+    if (badge) { badge.classList.add('show'); setTimeout(() => { card.classList.remove('flash-copy'); badge.classList.remove('show'); }, 1300); }
+}
+
+function renderAll() { renderNoteList(); renderHeader(); renderBlocks(); }
+
+function getActiveEditingBlockId() {
+    const el = document.activeElement;
+    if (!el || !el.classList || !el.classList.contains('block-edit-ta')) return null;
+    return el.closest('.block-card')?.dataset.id || null;
+}
+
+function updateEditingBlockChrome(block) {
+    const card = document.querySelector('.block-card[data-id="' + block.id + '"]');
+    if (!card) return;
+    const time = card.querySelector('.block-time');
+    if (time) {
+        const svg = time.querySelector('svg')?.outerHTML || '';
+        time.innerHTML = svg + fmtDateTime(block.createdAt);
+    }
+}
+
+function syncActiveTextarea(block, shouldUpdateText) {
+    if (!shouldUpdateText) return;
+    const card = document.querySelector('.block-card[data-id="' + block.id + '"]');
+    const ta = card?.querySelector('.block-edit-ta');
+    if (!ta || document.activeElement !== ta || ta.value === block.text) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const delta = (block.text || '').length - ta.value.length;
+    ta.value = block.text || '';
+    const nextStart = Math.max(0, Math.min(ta.value.length, start + delta));
+    const nextEnd = Math.max(nextStart, Math.min(ta.value.length, end + delta));
+    ta.setSelectionRange(nextStart, nextEnd);
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+}
+
+// ===== App =====
+const App = {
+    newNote() {
+        const now = new Date().toISOString();
+        const note = { id: uid(), title: '', pinned: false, updatedAt: now, blocks: [], groups: [], itemOrder: [] };
+        dispatch('note_upsert', note); state.currentNoteId = note.id;
+        renderAll(); App.hideSidebar();
+        setTimeout(() => document.getElementById('noteTitleInput').focus(), 60);
+    },
+    deleteNote() {
+        const n = currentNote(); if (!n) return;
+        if (!confirm('このメモを削除しますか？')) return;
+        dispatch('note_delete', { id: n.id });
+    },
+    toggleNotePin() {
+        const n = currentNote(); if (!n) return;
+        dispatch('note_upsert', { ...n, pinned: !n.pinned, updatedAt: new Date().toISOString() });
+    },
+    addBlock() {
+        const ta = document.getElementById('newBlockText');
+        const text = ta.value.trim(); if (!text) return;
+        const note = currentNote(); if (!note) return;
+        const now = new Date().toISOString();
+        const block = { id: uid(), noteId: note.id, text, pinned: false, createdAt: now, groupId: null };
+        const curOrder = getItemOrder(note);
+        const newOrder = [{ type: 'block', id: block.id }, ...curOrder];
+        const { blocks: _, ...noteWithoutBlocks } = { ...note, itemOrder: newOrder, updatedAt: now };
+        dispatch('block_upsert', block);
+        dispatch('note_upsert', noteWithoutBlocks);
+        ta.value = ''; ta.style.height = '38px';
+        document.querySelector('.blocks-wrap').scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    toggleSortMode() {
+        state.sortMode = !state.sortMode;
+        const btn = document.getElementById('sortModeBtn');
+        const banner = document.getElementById('sortBanner');
+        const main = document.getElementById('mainArea');
+        const addBar = document.getElementById('addBar');
+        const blocksArea = document.getElementById('blocksArea');
+        if (blocksArea._sortCleanup) { blocksArea._sortCleanup(); blocksArea._sortCleanup = null; }
+        if (state.sortMode) {
+            btn.classList.add('active'); banner.classList.add('show');
+            main.classList.add('sort-mode-active'); blocksArea.classList.add('sort-mode');
+            addBar.style.display = 'none';
+        } else {
+            btn.classList.remove('active'); banner.classList.remove('show');
+            main.classList.remove('sort-mode-active'); blocksArea.classList.remove('sort-mode');
+            const n = currentNote(); addBar.style.display = n ? 'flex' : 'none';
+        }
+        renderBlocks();
+    },
+    showSidebar() { document.getElementById('sidebar').classList.add('open'); },
+    hideSidebar() { document.getElementById('sidebar').classList.remove('open'); },
+    openSettings() {
+        const s = state.settings;
+        document.getElementById('setupUrl').value = s.url || '';
+        document.getElementById('setupKey').value = s.key || '';
+        document.getElementById('setupRoom').value = s.room || '';
+        document.getElementById('blockFontSlider').value = state.ui.blockFont;
+        document.getElementById('blockFontVal').textContent = state.ui.blockFont + 'px';
+        document.getElementById('groupFontSlider').value = state.ui.groupFont;
+        document.getElementById('groupFontVal').textContent = state.ui.groupFont + 'px';
+        document.getElementById('setupModal').classList.remove('hidden');
+    },
+    closeSettings() { document.getElementById('setupModal').classList.add('hidden'); },
+    saveSettings() {
+        const url = document.getElementById('setupUrl').value.trim().replace(/\/$/, '');
+        const key = document.getElementById('setupKey').value.trim();
+        const room = document.getElementById('setupRoom').value.trim();
+        state.ui.blockFont = parseFloat(document.getElementById('blockFontSlider').value);
+        state.ui.groupFont = parseInt(document.getElementById('groupFontSlider').value);
+        applyUiSettings();
+        if (!url || !room) { showToast('URLとルームIDは必須です'); return; }
+        state.settings = { url, key, room }; Store.set('cn_settings', state.settings);
+        App.closeSettings(); updateRoomInfo(); WS.reset(); loadFromServer();
+    },
+    logout() {
+        if (!confirm('ログアウトしますか？\nサーバー設定とローカルデータが削除されます。')) return;
+        WS.disconnect();
+        state.settings = { url: '', key: '', room: '' }; state.notes = []; state.currentNoteId = null;
+        Store.set('cn_settings', state.settings); Store.remove('cn_notes');
+        updateRoomInfo(); renderAll(); document.getElementById('setupModal').classList.remove('hidden');
+    },
+    exportCurrentNote() {
+        const note = currentNote();
+        if (!note) { showToast('エクスポートするメモを選択してください'); return; }
+        downloadJSON(note, 'clipnote-' + ((note.title || 'untitled').replace(/[^\w\-]/g, '_')) + '.json');
+        showToast('エクスポートしました');
+    },
+    exportAllNotes() {
+        downloadJSON({ notes: state.notes, exportedAt: new Date().toISOString() }, 'clipnote-all.json');
+        showToast('全メモをエクスポートしました');
+    },
+    importNotes() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.addEventListener('change', async () => {
+            const file = input.files[0]; if (!file) return;
+            try {
+                const text = await file.text();
+                const data = JSON.parse(text);
+                const now = new Date().toISOString();
+
+                const incoming = Array.isArray(data.notes) ? data.notes : [data];
+                if (!incoming.length || !incoming[0].id) {
+                    showToast('無効なファイル形式です'); return;
+                }
+
+                let added = 0;
+                for (const note of incoming) {
+                    const noteId = uid();
+                    const idMap = {};
+
+                    const newBlocks = (note.blocks || []).map(b => {
+                        const newId = uid();
+                        idMap[b.id] = newId;
+                        return { ...b, id: newId, noteId, groupId: b.groupId || null };
+                    });
+
+                    const newGroups = (note.groups || []).map(g => {
+                        const newId = uid();
+                        idMap[g.id] = newId;
+                        return { ...g, id: newId };
+                    });
+
+                    const remappedBlocks = newBlocks.map(b => ({
+                        ...b,
+                        groupId: b.groupId ? (idMap[b.groupId] || null) : null,
+                    }));
+
+                    const newItemOrder = (note.itemOrder || [])
+                        .map(item => ({ ...item, id: idMap[item.id] }))
+                        .filter(item => item.id);
+
+                    const importedNote = {
+                        id: noteId,
+                        title: (note.title || '無題のメモ') + ' (インポート)',
+                        pinned: false,
+                        updatedAt: now,
+                        blocks: remappedBlocks,
+                        groups: newGroups,
+                        itemOrder: newItemOrder,
+                    };
+
+                    dispatch('note_upsert', importedNote);
+                    for (const b of remappedBlocks) {
+                        dispatch('block_upsert', { ...b, noteId });
+                    }
+                    added++;
+                }
+                showToast(`インポート完了: ${added}件追加`);
+                sortNotes(); renderAll();
+            } catch (e) {
+                console.warn('import error', e);
+                showToast('インポートに失敗しました');
+            }
+        });
+        input.click();
+    },
+
+    // ===== Alias Modal =====
+    openAliasModal() {
+        aliases = AliasStore.load();
+        renderAliasTable();
+        document.getElementById('aliasModal').classList.remove('hidden');
+    },
+    closeAliasModal() {
+        document.getElementById('aliasModal').classList.add('hidden');
+    },
+    addAlias() {
+        const keyEl = document.getElementById('aliasNewKey');
+        const textEl = document.getElementById('aliasNewText');
+        const key = keyEl.value.trim().toUpperCase();
+        const text = textEl.value.trim();
+        if (!key || !text) { showToast('キーとテキストを入力してください'); return; }
+        if (!/^[A-Z]+[0-9]+$/.test(key)) { showToast('キーは大文字アルファベット+数字で入力してください (例: H1, P2)'); return; }
+        const existing = aliases.findIndex(a => a.key === key);
+        if (existing >= 0) {
+            aliases[existing].text = text;
+        } else {
+            aliases.push({ key, text });
+        }
+        aliases.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+        AliasStore.save(aliases);
+        keyEl.value = ''; textEl.value = '';
+        renderAliasTable();
+        renderBlocks(); // 展開表示を即時更新
+        showToast(existing >= 0 ? key + ' を更新しました' : key + ' を追加しました');
+    },
+    deleteAlias(key) {
+        aliases = aliases.filter(a => a.key !== key);
+        AliasStore.save(aliases);
+        renderAliasTable();
+        renderBlocks();
+    }
+};
+
+function renderAliasTable() {
+    const tbody = document.getElementById('aliasTbody');
+    tbody.innerHTML = '';
+    if (aliases.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" class="alias-empty">エイリアスが登録されていません</td></tr>';
+        return;
+    }
+    for (const a of aliases) {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+            '<td><span class="alias-key-cell">' + esc(a.key) + '</span></td>' +
+            '<td class="alias-text-cell">' + esc(a.text) + '</td>' +
+            '<td><button class="alias-del-btn" data-key="' + esc(a.key) + '" title="削除">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>' +
+            '</button></td>';
+        tr.querySelector('.alias-del-btn').addEventListener('click', () => App.deleteAlias(a.key));
+        tbody.appendChild(tr);
+    }
+}
+
+// ===== Helpers =====
+function downloadJSON(data, filename) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+
+function updateRoomInfo() {
+    const room = state.settings.room;
+    const el = document.getElementById('roomInfo'), lb = document.getElementById('roomNameLabel');
+    if (room) { lb.textContent = 'ルーム: ' + room; el.style.display = 'flex'; }
+    else { el.style.display = 'none'; }
+}
+
+function showToast(msg, dur = 2000) {
+    const el = document.getElementById('toast'); el.textContent = msg; el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), dur);
+}
+
+// ===== Slider events =====
+document.getElementById('blockFontSlider').addEventListener('input', function () {
+    document.getElementById('blockFontVal').textContent = this.value + 'px';
+    document.documentElement.style.setProperty('--block-font-size', this.value + 'px');
+});
+document.getElementById('groupFontSlider').addEventListener('input', function () {
+    document.getElementById('groupFontVal').textContent = this.value + 'px';
+    document.documentElement.style.setProperty('--group-font-size', this.value + 'px');
+});
+
+// ===== Events =====
+document.getElementById('searchInput').addEventListener('input', renderNoteList);
+document.getElementById('noteTitleInput').addEventListener('input', function () {
+    const n = currentNote(); if (!n) return;
+    dispatch('note_upsert', { ...n, title: this.value, updatedAt: new Date().toISOString() });
+});
+const addTa = document.getElementById('newBlockText');
+addTa.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); App.addBlock(); } });
+addTa.addEventListener('input', function () { this.style.height = '38px'; this.style.height = Math.min(this.scrollHeight, 120) + 'px'; });
+
+// エイリアスモーダルの入力欄でEnterで追加
+document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && document.activeElement &&
+        (document.activeElement.id === 'aliasNewKey' || document.activeElement.id === 'aliasNewText')) {
+        e.preventDefault();
+        App.addAlias();
+    }
+});
+
+// ===== Boot =====
+(function init() {
+    loadLocal(); sortNotes();
+    if (state.notes.length > 0) state.currentNoteId = state.notes[0].id;
+    applyUiSettings(); renderAll(); updateRoomInfo();
+    const { url, room } = state.settings;
+    if (!url || !room) document.getElementById('setupModal').classList.remove('hidden');
+    else { WS.connect(); loadFromServer(); }
+})();
+</file>
+
+<file path="client/index.html">
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="ClipNote">
+  <meta name="theme-color" content="#ffffff">
+  <title>ClipNote</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css?v=20260516-0004">
+</head>
+
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-top">
+          <span class="sidebar-title">ClipNote</span>
+          <div class="sidebar-status" id="statusDot" title="接続状態"></div>
+        </div>
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.35-4.35" />
+          </svg>
+          <input type="text" id="searchInput" placeholder="検索...">
+        </div>
+      </div>
+      <div class="note-list" id="noteList"></div>
+      <div class="sidebar-footer">
+        <button class="new-note-btn" onclick="App.newNote()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          新しいメモ
+        </button>
+        <div class="room-info" id="roomInfo" style="display:none">
+          <div class="room-info-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+            </svg>
+            <span class="room-name" id="roomNameLabel"></span>
+          </div>
+          <button class="logout-btn" onclick="App.logout()">ログアウト</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main" id="mainArea">
+      <header class="main-header">
+        <button class="back-btn" onclick="App.showSidebar()" aria-label="一覧へ">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m15 18-6-6 6-6" />
+          </svg>
+          一覧
+        </button>
+        <div class="header-center">
+          <input id="noteTitleInput" placeholder="タイトル..." autocomplete="off" spellcheck="false">
+          <div class="note-updated" id="noteUpdated"></div>
+        </div>
+        <div class="header-actions">
+          <button class="icon-btn" id="sortModeBtn" onclick="App.toggleSortMode()" title="並び替え">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+          <button class="icon-btn" id="notePinBtn" onclick="App.toggleNotePin()" title="ピン留め">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 17v5M9 3h6l1 7H8L9 3zM8 10l-2 7h12l-2-7" />
+            </svg>
+          </button>
+          <button class="icon-btn" onclick="App.deleteNote()" title="メモを削除">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14H6L5 6" />
+              <path d="M10 11v6M14 11v6" />
+              <path d="M9 6V4h6v2" />
+            </svg>
+          </button>
+          <!-- エイリアス管理ボタン -->
+          <button class="icon-btn" id="aliasMgrBtn" onclick="App.openAliasModal()" title="エイリアス管理">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path
+                d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2v-4M9 21H5a2 2 0 0 1-2-2v-4m0 0h18" />
+            </svg>
+          </button>
+          <button class="icon-btn" onclick="App.openSettings()" title="設定">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3" />
+              <path
+                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- 並び替えモードバナー -->
+      <div class="sort-banner" id="sortBanner">
+        ✦ 並び替えモード — ドラッグして並び替え、もう一度ボタンを押して完了
+      </div>
+
+      <div class="blocks-wrap">
+        <div class="blocks-area" id="blocksArea">
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            メモを選択するか、新しく作成してください
+          </div>
+        </div>
+      </div>
+
+      <div class="add-bar" id="addBar" style="display:none">
+        <textarea id="newBlockText" placeholder="テキストを入力... (Enterで追加、Shift+Enterで改行)" rows="1"></textarea>
+        <button class="add-btn" onclick="App.addBlock()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          追加
+        </button>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- 設定モーダル -->
+  <div class="modal-overlay hidden" id="setupModal">
+    <div class="modal">
+      <h2>設定</h2>
+
+      <!-- 表示設定 -->
+      <div class="modal-section">
+        <h3>表示</h3>
+        <label>ブロック文字サイズ: <span id="blockFontLabel">13.5</span>px</label>
+        <div class="slider-row">
+          <input type="range" id="blockFontSlider" min="10" max="28" step="0.5" value="13.5">
+          <span class="slider-val" id="blockFontVal">13.5px</span>
+        </div>
+        <label>グループ名文字サイズ: <span id="groupFontLabel">22</span>px</label>
+        <div class="slider-row">
+          <input type="range" id="groupFontSlider" min="12" max="36" step="1" value="22">
+          <span class="slider-val" id="groupFontVal">22px</span>
+        </div>
+      </div>
+
+      <!-- エクスポート -->
+      <div class="modal-section">
+        <h3>データ</h3>
+        <label style="margin-bottom:8px;">現在のメモをJSONでエクスポート（グループ構造を保持）</label>
+        <button class="export-btn" onclick="App.exportCurrentNote()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          現在のメモをエクスポート
+        </button>
+        <div style="margin-top:8px;">
+          <button class="export-btn" onclick="App.exportAllNotes()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            全メモをエクスポート
+          </button>
+        </div>
+        <div style="margin-top:8px;">
+          <button class="export-btn" onclick="App.importNotes()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+              <polyline points="17 8 12 3 7 8" />
+            </svg>
+            JSONからインポート
+          </button>
+        </div>
+      </div>
+
+      <!-- サーバー接続 -->
+      <div class="modal-section">
+        <h3>サーバー接続</h3>
+        <label>サーバーURL</label>
+        <input type="url" id="setupUrl" placeholder="https://clipnote.xxx.workers.dev" autocomplete="off">
+        <label>APIキー</label>
+        <input type="password" id="setupKey" autocomplete="off">
+        <label>ルームID（半角英数字）</label>
+        <input type="text" id="setupRoom" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="App.closeSettings()">キャンセル</button>
+        <button class="btn-primary" onclick="App.saveSettings()">保存して接続</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- エイリアス管理モーダル -->
+  <div class="modal-overlay hidden" id="aliasModal">
+    <div class="modal modal--alias">
+      <div class="modal-title-row">
+        <h2>エイリアス管理</h2>
+        <button class="modal-close-btn" onclick="App.closeAliasModal()" title="閉じる">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <p class="alias-desc">プロンプト内に <code>H1</code> のようなエイリアスを埋め込み、表示・コピー時に日本語へ自動展開します。</p>
+
+      <!-- 追加フォーム -->
+      <div class="alias-add-row">
+        <input type="text" id="aliasNewKey" placeholder="H1" maxlength="10" autocomplete="off" spellcheck="false"
+          class="alias-key-input">
+        <input type="text" id="aliasNewText" placeholder="展開後のテキスト" autocomplete="off" class="alias-text-input">
+        <button class="btn-primary alias-add-btn" onclick="App.addAlias()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          追加
+        </button>
+      </div>
+
+      <!-- テーブル -->
+      <div class="alias-table-wrap">
+        <table class="alias-table">
+          <thead>
+            <tr>
+              <th>キー</th>
+              <th>展開テキスト</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="aliasTbody"></tbody>
+        </table>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="App.closeAliasModal()">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=20260516-0004"></script>
+</body>
+
+</html>
+</file>
+
+<file path="client/manifest.json">
+{
+  "name": "ClipNote",
+  "short_name": "ClipNote",
+  "description": "マルチデバイス対応ブロック型メモアプリ",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "orientation": "any",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+</file>
+
+<file path="client/style.css">
+/* ===== Reset ===== */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+/* ===== CSS Variables ===== */
+:root {
+    --bg: #ffffff;
+    --bg2: #f5f5f4;
+    --bg3: #eeece8;
+    --text: #1c1c1a;
+    --text2: #6b6b67;
+    --text3: #a8a8a4;
+    --border: rgba(0, 0, 0, 0.10);
+    --border2: rgba(0, 0, 0, 0.18);
+    --blue: #185FA5;
+    --blue-bg: #E6F1FB;
+    --blue-border: #B5D4F4;
+    --green: #0F6E56;
+    --green-bg: #E1F5EE;
+    --green-border: #9FE1CB;
+    --grp: #5BAEDC;
+    --grp-bg: rgba(91, 174, 220, 0.07);
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --sidebar-w: 240px;
+    --header-h: 56px;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --block-font-size: 13.5px;
+    --group-font-size: 22px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #1c1c1a;
+        --bg2: #272725;
+        --bg3: #303030;
+        --text: #f0ede8;
+        --text2: #a0a09c;
+        --text3: #686864;
+        --border: rgba(255, 255, 255, 0.10);
+        --border2: rgba(255, 255, 255, 0.18);
+        --blue: #5b9fd4;
+        --blue-bg: rgba(24, 95, 165, 0.15);
+        --blue-border: rgba(24, 95, 165, 0.4);
+        --green: #3ecfa0;
+        --green-bg: rgba(15, 110, 86, 0.15);
+        --green-border: rgba(15, 110, 86, 0.4);
+        --grp: #4a9ec8;
+        --grp-bg: rgba(74, 158, 200, 0.09);
+    }
+}
+
+/* ===== Base ===== */
+html,
+body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg2);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+button {
+    cursor: pointer;
+    font-family: inherit;
+}
+
+input,
+textarea {
+    font-family: inherit;
+}
+
+input:focus,
+textarea:focus {
+    outline: none;
+}
+
+/* ===== Layout ===== */
+.app {
+    display: flex;
+    height: 100dvh;
+    overflow: hidden;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg2);
+    border-right: 0.5px solid var(--border);
+    overflow: hidden;
+}
+
+.sidebar-header {
+    padding: 14px 12px 10px;
+    border-bottom: 0.5px solid var(--border);
+    flex-shrink: 0;
+}
+
+.sidebar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.sidebar-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.sidebar-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text3);
+    transition: background .3s;
+}
+
+.sidebar-status.online {
+    background: var(--green);
+}
+
+.sidebar-status.error {
+    background: #e24b4a;
+}
+
+.search-wrap {
+    position: relative;
+}
+
+.search-wrap svg {
+    position: absolute;
+    left: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 14px;
+    color: var(--text3);
+    pointer-events: none;
+}
+
+#searchInput {
+    width: 100%;
+    padding: 7px 10px 7px 30px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+}
+
+#searchInput::placeholder {
+    color: var(--text3);
+}
+
+.note-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.note-item {
+    padding: 9px 10px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    margin-bottom: 2px;
+    border: 0.5px solid transparent;
+    transition: background .1s;
+}
+
+.note-item:hover {
+    background: var(--bg3);
+}
+
+.note-item.active {
+    background: var(--bg);
+    border-color: var(--border2);
+}
+
+.note-item-title {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text);
+}
+
+.note-item-title svg {
+    flex-shrink: 0;
+    color: var(--text3);
+}
+
+.note-item-meta {
+    font-size: 11px;
+    color: var(--text3);
+}
+
+.note-item-preview {
+    font-size: 12px;
+    color: var(--text2);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sidebar-footer {
+    padding: 10px 12px;
+    padding-bottom: calc(10px + var(--safe-bottom));
+    border-top: 0.5px solid var(--border);
+    flex-shrink: 0;
+}
+
+.new-note-btn {
+    width: 100%;
+    padding: 8px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
+.new-note-btn:hover {
+    background: var(--bg3);
+}
+
+.new-note-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+.room-info {
+    font-size: 11px;
+    color: var(--text3);
+    padding: 6px 2px 2px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.room-info-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    overflow: hidden;
+}
+
+.room-info-label svg {
+    flex-shrink: 0;
+    width: 11px;
+    height: 11px;
+}
+
+.room-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.logout-btn {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text3);
+    background: none;
+    border: 0.5px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    cursor: pointer;
+}
+
+.logout-btn:hover {
+    color: #e24b4a;
+    border-color: #e24b4a;
+}
+
+/* ===== Main ===== */
+.main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+    min-width: 0;
+}
+
+.main-header {
+    height: var(--header-h);
+    padding: 0 16px;
+    border-bottom: 0.5px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.back-btn {
+    display: none;
+    align-items: center;
+    gap: 3px;
+    font-size: 13px;
+    color: var(--blue);
+    background: none;
+    border: none;
+    padding: 6px 4px;
+    flex-shrink: 0;
+}
+
+.back-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.header-center {
+    flex: 1;
+    min-width: 0;
+}
+
+#noteTitleInput {
+    font-size: 17px;
+    font-weight: 600;
+    border: none;
+    background: transparent;
+    width: 100%;
+    color: var(--text);
+}
+
+#noteTitleInput::placeholder {
+    color: var(--text3);
+    font-weight: 400;
+}
+
+.note-updated {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 1px;
+}
+
+.header-actions {
+    display: flex;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.icon-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border);
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text2);
+    transition: background .1s;
+}
+
+.icon-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.icon-btn:hover {
+    background: var(--bg2);
+}
+
+.icon-btn.active {
+    color: var(--blue);
+    border-color: var(--blue-border);
+    background: var(--blue-bg);
+}
+
+/* ===== Sort mode banner ===== */
+.sort-banner {
+    display: none;
+    background: var(--blue-bg);
+    border-bottom: 0.5px solid var(--blue-border);
+    padding: 8px 16px;
+    font-size: 12px;
+    color: var(--blue);
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.sort-banner.show {
+    display: block;
+}
+
+/* ===== Blocks ===== */
+.blocks-wrap {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.blocks-area {
+    padding: 14px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* ===== Group ===== */
+.block-group {
+    position: relative;
+    border: 1.5px solid var(--grp);
+    border-radius: 14px;
+    background: var(--grp-bg);
+    padding: 0 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.block-group.drag-over-group {
+    border: 2px dashed var(--blue);
+    background: color-mix(in srgb, var(--blue) 6%, var(--bg));
+    transition: background 150ms, border-color 150ms;
+}
+
+/* 挿入位置インジケーター */
+.drop-indicator {
+    display: none;
+    position: absolute;
+    height: 3px;
+    border-radius: 3px;
+    background: var(--blue);
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 0 6px color-mix(in srgb, var(--blue) 60%, transparent);
+}
+
+.drop-indicator::before,
+.drop-indicator::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--blue);
+}
+
+.drop-indicator::before {
+    left: -4px;
+}
+
+.drop-indicator::after {
+    right: -4px;
+}
+
+.block-group-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+    padding: 0 4px;
+    max-width: 100%;
+    line-height: 1;
+}
+
+.block-group-label span {
+    font-size: var(--group-font-size);
+    font-weight: 700;
+    color: var(--grp);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    text-align: center;
+    flex: 1;
+    line-height: 1;
+}
+
+.block-group-label span:hover {
+    opacity: .7;
+}
+
+.block-group-label input {
+    font-size: var(--group-font-size);
+    font-weight: 700;
+    color: var(--grp);
+    border: none;
+    background: transparent;
+    padding: 0;
+    width: 140px;
+    display: none;
+    text-align: center;
+}
+
+.grp-unlink {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: none;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    opacity: .6;
+}
+
+.grp-unlink:hover {
+    color: #e24b4a;
+    opacity: 1;
+}
+
+.grp-unlink svg {
+    width: 13px;
+    height: 13px;
+}
+
+/* グループ内ブロック追加エリア */
+.grp-add-area {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 0 2px;
+}
+
+.grp-add-ta {
+    flex: 1;
+    resize: none;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text1);
+    font-size: 12.5px;
+    line-height: 1.4;
+    padding: 5px 8px;
+    height: 28px;
+    min-height: 28px;
+    outline: none;
+    transition: border-color .15s;
+    font-family: inherit;
+}
+
+.grp-add-ta:focus {
+    border-color: var(--grp);
+}
+
+.grp-add-ta::placeholder {
+    color: var(--text3);
+    opacity: .7;
+}
+
+.grp-add-btn {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: none;
+    background: var(--grp);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    opacity: .85;
+    transition: opacity .15s;
+    padding: 0;
+}
+
+.grp-add-btn:hover {
+    opacity: 1;
+}
+
+.grp-add-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* グループドラッグハンドル */
+.group-drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text3);
+    touch-action: none;
+    cursor: grab;
+    padding: 6px 4px;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.group-drag-handle svg {
+    width: 18px;
+    height: 18px;
+}
+
+.sort-mode .group-drag-handle {
+    visibility: visible;
+    pointer-events: auto;
+}
+
+/* ===== Block card ===== */
+.block-card {
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 12px 14px;
+    background: var(--bg);
+    position: relative;
+    transition: border-color .12s;
+}
+
+.block-card.pinned {
+    background: var(--bg2);
+    border-color: var(--border2);
+}
+
+.block-card.flash-copy {
+    border-color: var(--green);
+}
+
+.block-card.drag-over {
+    border: 1.5px dashed var(--blue);
+}
+
+.block-card.dragging {
+    opacity: .22;
+    transition: opacity 150ms;
+}
+
+/* 並び替えモード時カードスタイル */
+.sort-mode .block-card {
+    padding-left: 44px;
+}
+
+.sort-mode .block-card .block-header {
+    pointer-events: none;
+}
+
+.sort-mode .block-card .block-text {
+    cursor: default;
+}
+
+/* ソートモード中はテキスト選択を完全禁止 */
+.sort-mode * {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+}
+
+/* ドラッグハンドル */
+.sort-handle {
+    display: flex;
+    align-items: center;
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text3);
+    touch-action: none;
+    cursor: grab;
+    padding: 4px;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.sort-handle:active {
+    cursor: grabbing;
+}
+
+.sort-handle svg {
+    width: 18px;
+    height: 18px;
+}
+
+.sort-mode .sort-handle {
+    visibility: visible;
+    pointer-events: auto;
+}
+
+.block-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.block-time {
+    font-size: 11px;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+}
+
+.block-time svg {
+    width: 11px;
+    height: 11px;
+}
+
+.block-actions {
+    display: flex;
+    gap: 4px;
+    position: relative;
+}
+
+.block-act {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border);
+    background: var(--bg2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text2);
+}
+
+.block-act svg {
+    width: 14px;
+    height: 14px;
+}
+
+.block-act:hover {
+    background: var(--bg3);
+    color: var(--text);
+}
+
+.block-act.pin-on {
+    color: var(--blue);
+    border-color: var(--blue-border);
+    background: var(--blue-bg);
+}
+
+.block-act.grp-on {
+    color: var(--grp);
+    border-color: var(--grp);
+    background: var(--grp-bg);
+}
+
+/* 並び替えモード中はアクションボタン非表示 */
+.sort-mode .block-actions {
+    display: none;
+}
+
+.sort-mode .block-time {
+    pointer-events: none;
+}
+
+.block-text {
+    font-size: var(--block-font-size);
+    line-height: 1.7;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    cursor: pointer;
+    user-select: text;
+}
+
+.copy-badge {
+    position: absolute;
+    bottom: 10px;
+    right: 12px;
+    font-size: 11px;
+    color: var(--green);
+    background: var(--green-bg);
+    border: 0.5px solid var(--green-border);
+    padding: 2px 10px;
+    border-radius: 999px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .15s;
+}
+
+.copy-badge.show {
+    opacity: 1;
+}
+
+.block-edit-wrap {
+    display: none;
+}
+
+.block-edit-wrap.active {
+    display: block;
+}
+
+.block-text-wrap.editing {
+    display: none;
+}
+
+.block-edit-ta {
+    width: 100%;
+    font-size: var(--block-font-size);
+    line-height: 1.7;
+    color: var(--text);
+    background: var(--bg);
+    border: none;
+    border-radius: var(--radius-md);
+    resize: none;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    padding: 0;
+    min-height: 60px;
+}
+
+.block-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.edit-cancel-btn,
+.edit-save-btn {
+    padding: 5px 14px;
+    font-size: 12px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+}
+
+.edit-save-btn {
+    background: var(--blue);
+    color: #fff;
+    border-color: var(--blue);
+}
+
+.edit-save-btn:hover {
+    opacity: .9;
+}
+
+/* ===== Group picker popup ===== */
+.grp-picker {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: 34px;
+    background: var(--bg);
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius-lg);
+    padding: 6px;
+    z-index: 60;
+    min-width: 150px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, .13);
+}
+
+.grp-picker.open {
+    display: block;
+}
+
+.grp-picker-item {
+    padding: 7px 10px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.grp-picker-item:hover {
+    background: var(--bg2);
+}
+
+.grp-picker-item.cur {
+    color: var(--grp);
+    font-weight: 500;
+}
+
+.grp-picker-sep {
+    height: 0.5px;
+    background: var(--border);
+    margin: 4px 0;
+}
+
+.grp-picker-new {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    color: var(--blue);
+}
+
+.grp-picker-new:hover {
+    background: var(--bg2);
+}
+
+.grp-picker-new svg {
+    width: 13px;
+    height: 13px;
+}
+
+/* ===== Empty state ===== */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 20px;
+    color: var(--text3);
+    font-size: 14px;
+    text-align: center;
+    gap: 10px;
+}
+
+.empty-state svg {
+    width: 36px;
+    height: 36px;
+    opacity: .5;
+}
+
+/* ===== Add bar ===== */
+.add-bar {
+    padding: 10px 16px;
+    padding-bottom: calc(10px + var(--safe-bottom));
+    border-top: 0.5px solid var(--border);
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    background: var(--bg);
+}
+
+#newBlockText {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border);
+    background: var(--bg2);
+    color: var(--text);
+    resize: none;
+    height: 38px;
+    max-height: 120px;
+    line-height: 1.5;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    transition: border-color .1s, background .1s;
+}
+
+#newBlockText:focus {
+    border-color: var(--border2);
+    background: var(--bg);
+}
+
+#newBlockText::placeholder {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: var(--text3);
+}
+
+.add-btn {
+    padding: 0 14px;
+    height: 38px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.add-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+.add-btn:hover {
+    background: var(--bg3);
+}
+
+/* sort mode: hide add bar */
+.sort-mode-active .add-bar {
+    display: none !important;
+}
+
+/* ===== Toast ===== */
+.toast {
+    position: fixed;
+    bottom: calc(80px + var(--safe-bottom));
+    left: 50%;
+    transform: translateX(-50%) translateY(10px);
+    background: var(--text);
+    color: var(--bg);
+    font-size: 13px;
+    padding: 8px 18px;
+    border-radius: 999px;
+    opacity: 0;
+    transition: opacity .2s, transform .2s;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 100;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+/* ===== Modal ===== */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 20px;
+}
+
+.modal-overlay.hidden {
+    display: none;
+}
+
+.modal {
+    background: var(--bg);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    width: 100%;
+    max-width: 420px;
+    border: 0.5px solid var(--border2);
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal h2 {
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 16px;
+}
+
+.modal-section {
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 0.5px solid var(--border);
+}
+
+.modal-section:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.modal-section h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 12px;
+}
+
+.modal label {
+    font-size: 12px;
+    color: var(--text2);
+    display: block;
+    margin-bottom: 4px;
+}
+
+.modal input[type="text"],
+.modal input[type="url"],
+.modal input[type="password"] {
+    width: 100%;
+    padding: 9px 12px;
+    font-size: 14px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+    margin-bottom: 14px;
+}
+
+.modal input:focus {
+    border-color: var(--blue);
+}
+
+/* range slider */
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.slider-row input[type="range"] {
+    flex: 1;
+    accent-color: var(--blue);
+    margin: 0;
+}
+
+.slider-val {
+    font-size: 13px;
+    color: var(--text2);
+    min-width: 38px;
+    text-align: right;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.btn-primary {
+    padding: 8px 20px;
+    font-size: 14px;
+    border-radius: var(--radius-md);
+    border: none;
+    background: var(--blue);
+    color: #fff;
+}
+
+.btn-primary:hover {
+    opacity: .9;
+}
+
+.btn-secondary {
+    padding: 8px 16px;
+    font-size: 14px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+}
+
+.btn-danger {
+    padding: 8px 16px;
+    font-size: 14px;
+    border-radius: var(--radius-md);
+    border: none;
+    background: #e24b4a;
+    color: #fff;
+}
+
+.btn-danger:hover {
+    opacity: .9;
+}
+
+/* export button */
+.export-btn {
+    width: 100%;
+    padding: 9px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
+.export-btn:hover {
+    background: var(--bg3);
+}
+
+.export-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+/* ===== Mobile ===== */
+@media (max-width: 600px) {
+    :root {
+        --sidebar-w: 100%;
+    }
+
+    .sidebar {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        width: 100%;
+        transform: translateX(-100%);
+        transition: transform .25s ease;
+    }
+
+    .sidebar.open {
+        transform: translateX(0);
+    }
+
+    .back-btn {
+        display: flex;
+    }
+
+    .main-header {
+        padding: 0 12px;
+    }
+
+    #noteTitleInput {
+        font-size: 15px;
+    }
+
+    .blocks-area {
+        padding: 12px 14px 14px;
+    }
+
+    .add-bar {
+        padding: 8px 14px;
+        padding-bottom: calc(8px + var(--safe-bottom));
+    }
+}
+
+@media (min-width: 601px) {
+    .sidebar {
+        transform: none !important;
+    }
+}
+
+/* ===== Alias Badge ===== */
+.alias-badge {
+    display: inline-block;
+    font-size: 0.88em;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    line-height: 1.6;
+    vertical-align: baseline;
+    white-space: nowrap;
+}
+
+.alias-badge--defined {
+    color: var(--blue);
+    background: var(--blue-bg);
+    border: 0.5px solid var(--blue-border);
+}
+
+.alias-badge--undefined {
+    color: #c0392b;
+    background: rgba(192, 57, 43, 0.08);
+    border: 0.5px solid rgba(192, 57, 43, 0.35);
+}
+
+@media (prefers-color-scheme: dark) {
+    .alias-badge--undefined {
+        color: #e57373;
+        background: rgba(229, 115, 115, 0.12);
+        border-color: rgba(229, 115, 115, 0.35);
+    }
+}
+
+/* ===== Alias Modal ===== */
+.modal--alias {
+    max-width: 520px;
+}
+
+.modal-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.modal-title-row h2 {
+    margin-bottom: 0;
+}
+
+.modal-close-btn {
+    width: 30px;
+    height: 30px;
+    border: none;
+    background: transparent;
+    color: var(--text2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+}
+
+.modal-close-btn:hover {
+    background: var(--bg3);
+    color: var(--text);
+}
+
+.modal-close-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.alias-desc {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 14px;
+    line-height: 1.6;
+}
+
+.alias-desc code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    background: var(--bg3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--blue);
+}
+
+.alias-add-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    align-items: center;
+}
+
+.alias-key-input {
+    width: 80px;
+    flex-shrink: 0;
+    padding: 8px 10px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.alias-key-input:focus {
+    border-color: var(--blue);
+    outline: none;
+}
+
+.alias-text-input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    font-size: 13px;
+    border-radius: var(--radius-md);
+    border: 0.5px solid var(--border2);
+    background: var(--bg2);
+    color: var(--text);
+}
+
+.alias-text-input:focus {
+    border-color: var(--blue);
+    outline: none;
+}
+
+.alias-add-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-size: 13px;
+    padding: 8px 14px;
+}
+
+.alias-table-wrap {
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-bottom: 16px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.alias-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.alias-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.alias-table th {
+    background: var(--bg2);
+    color: var(--text2);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 0.5px solid var(--border);
+}
+
+.alias-table td {
+    padding: 9px 12px;
+    border-bottom: 0.5px solid var(--border);
+    vertical-align: middle;
+}
+
+.alias-table tr:last-child td {
+    border-bottom: none;
+}
+
+.alias-table tr:hover td {
+    background: var(--bg2);
+}
+
+.alias-key-cell {
+    display: inline-block;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    font-weight: 700;
+    font-size: 12px;
+    color: var(--blue);
+    background: var(--blue-bg);
+    border: 0.5px solid var(--blue-border);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.alias-text-cell {
+    color: var(--text);
+    word-break: break-all;
+}
+
+.alias-del-btn {
+    width: 26px;
+    height: 26px;
+    border: none;
+    background: transparent;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+    margin: 0 auto;
+}
+
+.alias-del-btn:hover {
+    background: rgba(226, 75, 74, 0.1);
+    color: #e24b4a;
+}
+
+.alias-empty {
+    text-align: center;
+    color: var(--text3);
+    padding: 24px 0;
+    font-size: 13px;
+}
+</file>
+
+<file path="server/.wrangler/cache/pages.json">
+{
+  "account_id": "caa8579c6ef66143854aaf031dc305f5",
+  "project_name": "clipnote"
+}
+</file>
+
+<file path="server/.wrangler/cache/wrangler-account.json">
+{
+  "account": {
+    "id": "caa8579c6ef66143854aaf031dc305f5",
+    "name": "Amamisa4@gmail.com's Account"
+  }
+}
+</file>
+
+<file path="server/package-lock.json">
+{
+  "name": "clipnote-server",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "clipnote-server",
+      "version": "1.0.0",
+      "devDependencies": {
+        "wrangler": "^3.0.0"
+      }
+    },
+    "node_modules/@cloudflare/kv-asset-handler": {
+      "version": "0.3.4",
+      "resolved": "https://registry.npmjs.org/@cloudflare/kv-asset-handler/-/kv-asset-handler-0.3.4.tgz",
+      "integrity": "sha512-YLPHc8yASwjNkmcDMQMY35yiWjoKAKnhUbPRszBRS0YgH+IXtsMp61j+yTcnCE3oO2DgP0U3iejLC8FTtKDC8Q==",
+      "dev": true,
+      "license": "MIT OR Apache-2.0",
+      "dependencies": {
+        "mime": "^3.0.0"
+      },
+      "engines": {
+        "node": ">=16.13"
+      }
+    },
+    "node_modules/@cloudflare/unenv-preset": {
+      "version": "2.0.2",
+      "resolved": "https://registry.npmjs.org/@cloudflare/unenv-preset/-/unenv-preset-2.0.2.tgz",
+      "integrity": "sha512-nyzYnlZjjV5xT3LizahG1Iu6mnrCaxglJ04rZLpDwlDVDZ7v46lNsfxhV3A/xtfgQuSHmLnc6SVI+KwBpc3Lwg==",
+      "dev": true,
+      "license": "MIT OR Apache-2.0",
+      "peerDependencies": {
+        "unenv": "2.0.0-rc.14",
+        "workerd": "^1.20250124.0"
+      },
+      "peerDependenciesMeta": {
+        "workerd": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/@cloudflare/workerd-darwin-64": {
+      "version": "1.20250718.0",
+      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-darwin-64/-/workerd-darwin-64-1.20250718.0.tgz",
+      "integrity": "sha512-FHf4t7zbVN8yyXgQ/r/GqLPaYZSGUVzeR7RnL28Mwj2djyw2ZergvytVc7fdGcczl6PQh+VKGfZCfUqpJlbi9g==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">=16"
+      }
+    },
+    "node_modules/@cloudflare/workerd-darwin-arm64": {
+      "version": "1.20250718.0",
+      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-darwin-arm64/-/workerd-darwin-arm64-1.20250718.0.tgz",
+      "integrity": "sha512-fUiyUJYyqqp4NqJ0YgGtp4WJh/II/YZsUnEb6vVy5Oeas8lUOxnN+ZOJ8N/6/5LQCVAtYCChRiIrBbfhTn5Z8Q==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">=16"
+      }
+    },
+    "node_modules/@cloudflare/workerd-linux-64": {
+      "version": "1.20250718.0",
+      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-linux-64/-/workerd-linux-64-1.20250718.0.tgz",
+      "integrity": "sha512-5+eb3rtJMiEwp08Kryqzzu8d1rUcK+gdE442auo5eniMpT170Dz0QxBrqkg2Z48SFUPYbj+6uknuA5tzdRSUSg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=16"
+      }
+    },
+    "node_modules/@cloudflare/workerd-linux-arm64": {
+      "version": "1.20250718.0",
+      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-linux-arm64/-/workerd-linux-arm64-1.20250718.0.tgz",
+      "integrity": "sha512-Aa2M/DVBEBQDdATMbn217zCSFKE+ud/teS+fFS+OQqKABLn0azO2qq6ANAHYOIE6Q3Sq4CxDIQr8lGdaJHwUog==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=16"
+      }
+    },
+    "node_modules/@cloudflare/workerd-windows-64": {
+      "version": "1.20250718.0",
+      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-windows-64/-/workerd-windows-64-1.20250718.0.tgz",
+      "integrity": "sha512-dY16RXKffmugnc67LTbyjdDHZn5NoTF1yHEf2fN4+OaOnoGSp3N1x77QubTDwqZ9zECWxgQfDLjddcH8dWeFhg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=16"
+      }
+    },
+    "node_modules/@cspotcode/source-map-support": {
+      "version": "0.8.1",
+      "resolved": "https://registry.npmjs.org/@cspotcode/source-map-support/-/source-map-support-0.8.1.tgz",
+      "integrity": "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@jridgewell/trace-mapping": "0.3.9"
+      },
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@emnapi/runtime": {
+      "version": "1.10.0",
+      "resolved": "https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.10.0.tgz",
+      "integrity": "sha512-ewvYlk86xUoGI0zQRNq/mC+16R1QeDlKQy21Ki3oSYXNgLb45GV1P6A0M+/s6nyCuNDqe5VpaY84BzXGwVbwFA==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "dependencies": {
+        "tslib": "^2.4.0"
+      }
+    },
+    "node_modules/@esbuild-plugins/node-globals-polyfill": {
+      "version": "0.2.3",
+      "resolved": "https://registry.npmjs.org/@esbuild-plugins/node-globals-polyfill/-/node-globals-polyfill-0.2.3.tgz",
+      "integrity": "sha512-r3MIryXDeXDOZh7ih1l/yE9ZLORCd5e8vWg02azWRGj5SPTuoh69A2AIyn0Z31V/kHBfZ4HgWJ+OK3GTTwLmnw==",
+      "dev": true,
+      "license": "ISC",
+      "peerDependencies": {
+        "esbuild": "*"
+      }
+    },
+    "node_modules/@esbuild-plugins/node-modules-polyfill": {
+      "version": "0.2.2",
+      "resolved": "https://registry.npmjs.org/@esbuild-plugins/node-modules-polyfill/-/node-modules-polyfill-0.2.2.tgz",
+      "integrity": "sha512-LXV7QsWJxRuMYvKbiznh+U1ilIop3g2TeKRzUxOG5X3YITc8JyyTa90BmLwqqv0YnX4v32CSlG+vsziZp9dMvA==",
+      "dev": true,
+      "license": "ISC",
+      "dependencies": {
+        "escape-string-regexp": "^4.0.0",
+        "rollup-plugin-node-polyfills": "^0.2.1"
+      },
+      "peerDependencies": {
+        "esbuild": "*"
+      }
+    },
+    "node_modules/@esbuild/android-arm": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/android-arm/-/android-arm-0.17.19.tgz",
+      "integrity": "sha512-rIKddzqhmav7MSmoFCmDIb6e2W57geRsM94gV2l38fzhXMwq7hZoClug9USI2pFRGL06f4IOPHHpFNOkWieR8A==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/android-arm64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/android-arm64/-/android-arm64-0.17.19.tgz",
+      "integrity": "sha512-KBMWvEZooR7+kzY0BtbTQn0OAYY7CsiydT63pVEaPtVYF0hXbUaOyZog37DKxK7NF3XacBJOpYT4adIJh+avxA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/android-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/android-x64/-/android-x64-0.17.19.tgz",
+      "integrity": "sha512-uUTTc4xGNDT7YSArp/zbtmbhO0uEEK9/ETW29Wk1thYUJBz3IVnvgEiEwEa9IeLyvnpKrWK64Utw2bgUmDveww==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/darwin-arm64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.17.19.tgz",
+      "integrity": "sha512-80wEoCfF/hFKM6WE1FyBHc9SfUblloAWx6FJkFWTWiCoht9Mc0ARGEM47e67W9rI09YoUxJL68WHfDRYEAvOhg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/darwin-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.17.19.tgz",
+      "integrity": "sha512-IJM4JJsLhRYr9xdtLytPLSH9k/oxR3boaUIYiHkAawtwNOXKE8KoU8tMvryogdcT8AU+Bflmh81Xn6Q0vTZbQw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/freebsd-arm64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-arm64/-/freebsd-arm64-0.17.19.tgz",
+      "integrity": "sha512-pBwbc7DufluUeGdjSU5Si+P3SoMF5DQ/F/UmTSb8HXO80ZEAJmrykPyzo1IfNbAoaqw48YRpv8shwd1NoI0jcQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/freebsd-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-x64/-/freebsd-x64-0.17.19.tgz",
+      "integrity": "sha512-4lu+n8Wk0XlajEhbEffdy2xy53dpR06SlzvhGByyg36qJw6Kpfk7cp45DR/62aPH9mtJRmIyrXAS5UWBrJT6TQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-arm": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm/-/linux-arm-0.17.19.tgz",
+      "integrity": "sha512-cdmT3KxjlOQ/gZ2cjfrQOtmhG4HJs6hhvm3mWSRDPtZ/lP5oe8FWceS10JaSJC13GBd4eH/haHnqf7hhGNLerA==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-arm64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.17.19.tgz",
+      "integrity": "sha512-ct1Tg3WGwd3P+oZYqic+YZF4snNl2bsnMKRkb3ozHmnM0dGWuxcPTTntAF6bOP0Sp4x0PjSF+4uHQ1xvxfRKqg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-ia32": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-ia32/-/linux-ia32-0.17.19.tgz",
+      "integrity": "sha512-w4IRhSy1VbsNxHRQpeGCHEmibqdTUx61Vc38APcsRbuVgK0OPEnQ0YD39Brymn96mOx48Y2laBQGqgZ0j9w6SQ==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-loong64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-loong64/-/linux-loong64-0.17.19.tgz",
+      "integrity": "sha512-2iAngUbBPMq439a+z//gE+9WBldoMp1s5GWsUSgqHLzLJ9WoZLZhpwWuym0u0u/4XmZ3gpHmzV84PonE+9IIdQ==",
+      "cpu": [
+        "loong64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-mips64el": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-mips64el/-/linux-mips64el-0.17.19.tgz",
+      "integrity": "sha512-LKJltc4LVdMKHsrFe4MGNPp0hqDFA1Wpt3jE1gEyM3nKUvOiO//9PheZZHfYRfYl6AwdTH4aTcXSqBerX0ml4A==",
+      "cpu": [
+        "mips64el"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-ppc64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-ppc64/-/linux-ppc64-0.17.19.tgz",
+      "integrity": "sha512-/c/DGybs95WXNS8y3Ti/ytqETiW7EU44MEKuCAcpPto3YjQbyK3IQVKfF6nbghD7EcLUGl0NbiL5Rt5DMhn5tg==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-riscv64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-riscv64/-/linux-riscv64-0.17.19.tgz",
+      "integrity": "sha512-FC3nUAWhvFoutlhAkgHf8f5HwFWUL6bYdvLc/TTuxKlvLi3+pPzdZiFKSWz/PF30TB1K19SuCxDTI5KcqASJqA==",
+      "cpu": [
+        "riscv64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-s390x": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-s390x/-/linux-s390x-0.17.19.tgz",
+      "integrity": "sha512-IbFsFbxMWLuKEbH+7sTkKzL6NJmG2vRyy6K7JJo55w+8xDk7RElYn6xvXtDW8HCfoKBFK69f3pgBJSUSQPr+4Q==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/linux-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.17.19.tgz",
+      "integrity": "sha512-68ngA9lg2H6zkZcyp22tsVt38mlhWde8l3eJLWkyLrp4HwMUr3c1s/M2t7+kHIhvMjglIBrFpncX1SzMckomGw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/netbsd-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.17.19.tgz",
+      "integrity": "sha512-CwFq42rXCR8TYIjIfpXCbRX0rp1jo6cPIUPSaWwzbVI4aOfX96OXY8M6KNmtPcg7QjYeDmN+DD0Wp3LaBOLf4Q==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "netbsd"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/openbsd-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-x64/-/openbsd-x64-0.17.19.tgz",
+      "integrity": "sha512-cnq5brJYrSZ2CF6c35eCmviIN3k3RczmHz8eYaVlNasVqsNY+JKohZU5MKmaOI+KkllCdzOKKdPs762VCPC20g==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openbsd"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/sunos-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/sunos-x64/-/sunos-x64-0.17.19.tgz",
+      "integrity": "sha512-vCRT7yP3zX+bKWFeP/zdS6SqdWB8OIpaRq/mbXQxTGHnIxspRtigpkUcDMlSCOejlHowLqII7K2JKevwyRP2rg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "sunos"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/win32-arm64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.17.19.tgz",
+      "integrity": "sha512-yYx+8jwowUstVdorcMdNlzklLYhPxjniHWFKgRqH7IFlUEa0Umu3KuYplf1HUZZ422e3NU9F4LGb+4O0Kdcaag==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/win32-ia32": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.17.19.tgz",
+      "integrity": "sha512-eggDKanJszUtCdlVs0RB+h35wNlb5v4TWEkq4vZcmVt5u/HiDZrTXe2bWFQUez3RgNHwx/x4sk5++4NSSicKkw==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@esbuild/win32-x64": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.17.19.tgz",
+      "integrity": "sha512-lAhycmKnVOuRYNtRtatQR1LPQf2oYCkRGkSFnseDAKPl8lu5SOsK/e1sXe5a0Pc5kHIHe6P2I/ilntNv2xf3cA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/@fastify/busboy": {
+      "version": "2.1.1",
+      "resolved": "https://registry.npmjs.org/@fastify/busboy/-/busboy-2.1.1.tgz",
+      "integrity": "sha512-vBZP4NlzfOlerQTnba4aqZoMhE/a9HY7HRqoOPaETQcSQuWEIyZMHGfVu6w9wGtGK5fED5qRs2DteVCjOH60sA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=14"
+      }
+    },
+    "node_modules/@img/sharp-darwin-arm64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.33.5.tgz",
+      "integrity": "sha512-UT4p+iz/2H4twwAoLCqfA9UH5pI6DggwKEGuaPy7nCVQ8ZsiY5PIcrRvD1DzuY3qYL07NtIQcWnBSY/heikIFQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-darwin-arm64": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-darwin-x64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-darwin-x64/-/sharp-darwin-x64-0.33.5.tgz",
+      "integrity": "sha512-fyHac4jIc1ANYGRDxtiqelIbdWkIuQaI84Mv45KvGRRxSAa7o7d1ZKAOBaYbnepLC1WqxfpimdeWfvqqSGwR2Q==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-darwin-x64": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-libvips-darwin-arm64": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.0.4.tgz",
+      "integrity": "sha512-XblONe153h0O2zuFfTAbQYAX2JhYmDHeWikp1LM9Hul9gVPjFY427k6dFEcOL72O01QxQsWi761svJ/ev9xEDg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-darwin-x64": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-darwin-x64/-/sharp-libvips-darwin-x64-1.0.4.tgz",
+      "integrity": "sha512-xnGR8YuZYfJGmWPvmlunFaWJsb9T/AO2ykoP3Fz/0X5XV2aoYBPkX6xqCQvUTKKiLddarLaxpzNe+b1hjeWHAQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-linux-arm": {
+      "version": "1.0.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-arm/-/sharp-libvips-linux-arm-1.0.5.tgz",
+      "integrity": "sha512-gvcC4ACAOPRNATg/ov8/MnbxFDJqf/pDePbBnuBDcjsI8PssmjoKMAz4LtLaVi+OnSb5FK/yIOamqDwGmXW32g==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-linux-arm64": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-arm64/-/sharp-libvips-linux-arm64-1.0.4.tgz",
+      "integrity": "sha512-9B+taZ8DlyyqzZQnoeIvDVR/2F4EbMepXMc/NdVbkzsJbzkUjhXv/70GQJ7tdLA4YJgNP25zukcxpX2/SueNrA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-linux-s390x": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-s390x/-/sharp-libvips-linux-s390x-1.0.4.tgz",
+      "integrity": "sha512-u7Wz6ntiSSgGSGcjZ55im6uvTrOxSIS8/dgoVMoiGE9I6JAfU50yH5BoDlYA1tcuGS7g/QNtetJnxA6QEsCVTA==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-linux-x64": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-x64/-/sharp-libvips-linux-x64-1.0.4.tgz",
+      "integrity": "sha512-MmWmQ3iPFZr0Iev+BAgVMb3ZyC4KeFc3jFxnNbEPas60e1cIfevbtuyf9nDGIzOaW9PdnDciJm+wFFaTlj5xYw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-linuxmusl-arm64": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linuxmusl-arm64/-/sharp-libvips-linuxmusl-arm64-1.0.4.tgz",
+      "integrity": "sha512-9Ti+BbTYDcsbp4wfYib8Ctm1ilkugkA/uscUn6UXK1ldpC1JjiXbLfFZtRlBhjPZ5o1NCLiDbg8fhUPKStHoTA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-libvips-linuxmusl-x64": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linuxmusl-x64/-/sharp-libvips-linuxmusl-x64-1.0.4.tgz",
+      "integrity": "sha512-viYN1KX9m+/hGkJtvYYp+CCLgnJXwiQB39damAO7WMdKWlIhmYTfHjwSbQeUK/20vY154mwezd9HflVFM1wVSw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-linux-arm": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-linux-arm/-/sharp-linux-arm-0.33.5.tgz",
+      "integrity": "sha512-JTS1eldqZbJxjvKaAkxhZmBqPRGmxgu+qFKSInv8moZ2AmT5Yib3EQ1c6gp493HvrvV8QgdOXdyaIBrhvFhBMQ==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-linux-arm": "1.0.5"
+      }
+    },
+    "node_modules/@img/sharp-linux-arm64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-linux-arm64/-/sharp-linux-arm64-0.33.5.tgz",
+      "integrity": "sha512-JMVv+AMRyGOHtO1RFBiJy/MBsgz0x4AWrT6QoEVVTyh1E39TrCUpTRI7mx9VksGX4awWASxqCYLCV4wBZHAYxA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-linux-arm64": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-linux-s390x": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-linux-s390x/-/sharp-linux-s390x-0.33.5.tgz",
+      "integrity": "sha512-y/5PCd+mP4CA/sPDKl2961b+C9d+vPAveS33s6Z3zfASk2j5upL6fXVPZi7ztePZ5CuH+1kW8JtvxgbuXHRa4Q==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-linux-s390x": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-linux-x64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-linux-x64/-/sharp-linux-x64-0.33.5.tgz",
+      "integrity": "sha512-opC+Ok5pRNAzuvq1AG0ar+1owsu842/Ab+4qvU879ippJBHvyY5n2mxF1izXqkPYlGuP/M556uh53jRLJmzTWA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-linux-x64": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-linuxmusl-arm64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-linuxmusl-arm64/-/sharp-linuxmusl-arm64-0.33.5.tgz",
+      "integrity": "sha512-XrHMZwGQGvJg2V/oRSUfSAfjfPxO+4DkiRh6p2AFjLQztWUuY/o8Mq0eMQVIY7HJ1CDQUJlxGGZRw1a5bqmd1g==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-linuxmusl-arm64": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-linuxmusl-x64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-linuxmusl-x64/-/sharp-linuxmusl-x64-0.33.5.tgz",
+      "integrity": "sha512-WT+d/cgqKkkKySYmqoZ8y3pxx7lx9vVejxW/W4DOFMYVSkErR+w7mf2u8m/y4+xHe7yY9DAXQMWQhpnMuFfScw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-libvips-linuxmusl-x64": "1.0.4"
+      }
+    },
+    "node_modules/@img/sharp-wasm32": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.33.5.tgz",
+      "integrity": "sha512-ykUW4LVGaMcU9lu9thv85CbRMAwfeadCJHRsg2GmeRa/cJxsVY9Rbd57JcMxBkKHag5U/x7TSBpScF4U8ElVzg==",
+      "cpu": [
+        "wasm32"
+      ],
+      "dev": true,
+      "license": "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
+      "optional": true,
+      "dependencies": {
+        "@emnapi/runtime": "^1.2.0"
+      },
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-win32-ia32": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-win32-ia32/-/sharp-win32-ia32-0.33.5.tgz",
+      "integrity": "sha512-T36PblLaTwuVJ/zw/LaH0PdZkRz5rd3SmMHX8GSmR7vtNSP5Z6bQkExdSK7xGWyxLw4sUknBuugTelgw2faBbQ==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "Apache-2.0 AND LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@img/sharp-win32-x64": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.33.5.tgz",
+      "integrity": "sha512-MpY/o8/8kj+EcnxwvrP4aTJSWw/aZ7JIGR4aBeZkZw5B7/Jn+tY9/VNwtcoGmdT7GfggGIU4kygOMSbYnOrAbg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "Apache-2.0 AND LGPL-3.0-or-later",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      }
+    },
+    "node_modules/@jridgewell/resolve-uri": {
+      "version": "3.1.2",
+      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
+      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=6.0.0"
+      }
+    },
+    "node_modules/@jridgewell/sourcemap-codec": {
+      "version": "1.5.5",
+      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz",
+      "integrity": "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/@jridgewell/trace-mapping": {
+      "version": "0.3.9",
+      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.9.tgz",
+      "integrity": "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@jridgewell/resolve-uri": "^3.0.3",
+        "@jridgewell/sourcemap-codec": "^1.4.10"
+      }
+    },
+    "node_modules/acorn": {
+      "version": "8.14.0",
+      "resolved": "https://registry.npmjs.org/acorn/-/acorn-8.14.0.tgz",
+      "integrity": "sha512-cl669nCJTZBsL97OF4kUQm5g5hC2uihk0NxY3WENAC0TYdILVkAyHymAntgxGkl7K+t0cXIrH5siy5S4XkFycA==",
+      "dev": true,
+      "license": "MIT",
+      "bin": {
+        "acorn": "bin/acorn"
+      },
+      "engines": {
+        "node": ">=0.4.0"
+      }
+    },
+    "node_modules/acorn-walk": {
+      "version": "8.3.2",
+      "resolved": "https://registry.npmjs.org/acorn-walk/-/acorn-walk-8.3.2.tgz",
+      "integrity": "sha512-cjkyv4OtNCIeqhHrfS81QWXoCBPExR/J62oyEqepVw8WaQeSqpW2uhuLPh1m9eWhDuOo/jUXVTlifvesOWp/4A==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.4.0"
+      }
+    },
+    "node_modules/as-table": {
+      "version": "1.0.55",
+      "resolved": "https://registry.npmjs.org/as-table/-/as-table-1.0.55.tgz",
+      "integrity": "sha512-xvsWESUJn0JN421Xb9MQw6AsMHRCUknCe0Wjlxvjud80mU4E6hQf1A6NzQKcYNmYw62MfzEtXc+badstZP3JpQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "printable-characters": "^1.0.42"
+      }
+    },
+    "node_modules/blake3-wasm": {
+      "version": "2.1.5",
+      "resolved": "https://registry.npmjs.org/blake3-wasm/-/blake3-wasm-2.1.5.tgz",
+      "integrity": "sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/color": {
+      "version": "4.2.3",
+      "resolved": "https://registry.npmjs.org/color/-/color-4.2.3.tgz",
+      "integrity": "sha512-1rXeuUUiGGrykh+CeBdu5Ie7OJwinCgQY0bc7GCRxy5xVHy+moaqkpL/jqQq0MtQOeYcrqEz4abc5f0KtU7W4A==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "dependencies": {
+        "color-convert": "^2.0.1",
+        "color-string": "^1.9.0"
+      },
+      "engines": {
+        "node": ">=12.5.0"
+      }
+    },
+    "node_modules/color-convert": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/color-convert/-/color-convert-2.0.1.tgz",
+      "integrity": "sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "dependencies": {
+        "color-name": "~1.1.4"
+      },
+      "engines": {
+        "node": ">=7.0.0"
+      }
+    },
+    "node_modules/color-name": {
+      "version": "1.1.4",
+      "resolved": "https://registry.npmjs.org/color-name/-/color-name-1.1.4.tgz",
+      "integrity": "sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true
+    },
+    "node_modules/color-string": {
+      "version": "1.9.1",
+      "resolved": "https://registry.npmjs.org/color-string/-/color-string-1.9.1.tgz",
+      "integrity": "sha512-shrVawQFojnZv6xM40anx4CkoDP+fZsw/ZerEMsW/pyzsRbElpsL/DBVW7q3ExxwusdNXI3lXpuhEZkzs8p5Eg==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "dependencies": {
+        "color-name": "^1.0.0",
+        "simple-swizzle": "^0.2.2"
+      }
+    },
+    "node_modules/cookie": {
+      "version": "0.7.2",
+      "resolved": "https://registry.npmjs.org/cookie/-/cookie-0.7.2.tgz",
+      "integrity": "sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/data-uri-to-buffer": {
+      "version": "2.0.2",
+      "resolved": "https://registry.npmjs.org/data-uri-to-buffer/-/data-uri-to-buffer-2.0.2.tgz",
+      "integrity": "sha512-ND9qDTLc6diwj+Xe5cdAgVTbLVdXbtxTJRXRhli8Mowuaan+0EJOtdqJ0QCHNSSPyoXGx9HX2/VMnKeC34AChA==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/defu": {
+      "version": "6.1.7",
+      "resolved": "https://registry.npmjs.org/defu/-/defu-6.1.7.tgz",
+      "integrity": "sha512-7z22QmUWiQ/2d0KkdYmANbRUVABpZ9SNYyH5vx6PZ+nE5bcC0l7uFvEfHlyld/HcGBFTL536ClDt3DEcSlEJAQ==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/detect-libc": {
+      "version": "2.1.2",
+      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+      "dev": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "engines": {
+        "node": ">=8"
+      }
+    },
+    "node_modules/esbuild": {
+      "version": "0.17.19",
+      "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.17.19.tgz",
+      "integrity": "sha512-XQ0jAPFkK/u3LcVRcvVHQcTIqD6E2H1fvZMA5dQPSOWb3suUbWbfbRf94pjc0bNzRYLfIrDRQXr7X+LHIm5oHw==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "MIT",
+      "bin": {
+        "esbuild": "bin/esbuild"
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "optionalDependencies": {
+        "@esbuild/android-arm": "0.17.19",
+        "@esbuild/android-arm64": "0.17.19",
+        "@esbuild/android-x64": "0.17.19",
+        "@esbuild/darwin-arm64": "0.17.19",
+        "@esbuild/darwin-x64": "0.17.19",
+        "@esbuild/freebsd-arm64": "0.17.19",
+        "@esbuild/freebsd-x64": "0.17.19",
+        "@esbuild/linux-arm": "0.17.19",
+        "@esbuild/linux-arm64": "0.17.19",
+        "@esbuild/linux-ia32": "0.17.19",
+        "@esbuild/linux-loong64": "0.17.19",
+        "@esbuild/linux-mips64el": "0.17.19",
+        "@esbuild/linux-ppc64": "0.17.19",
+        "@esbuild/linux-riscv64": "0.17.19",
+        "@esbuild/linux-s390x": "0.17.19",
+        "@esbuild/linux-x64": "0.17.19",
+        "@esbuild/netbsd-x64": "0.17.19",
+        "@esbuild/openbsd-x64": "0.17.19",
+        "@esbuild/sunos-x64": "0.17.19",
+        "@esbuild/win32-arm64": "0.17.19",
+        "@esbuild/win32-ia32": "0.17.19",
+        "@esbuild/win32-x64": "0.17.19"
+      }
+    },
+    "node_modules/escape-string-regexp": {
+      "version": "4.0.0",
+      "resolved": "https://registry.npmjs.org/escape-string-regexp/-/escape-string-regexp-4.0.0.tgz",
+      "integrity": "sha512-TtpcNJ3XAzx3Gq8sWRzJaVajRs0uVxA2YAkdb1jm2YkPz4G6egUFAyA3n5vtEIZefPk5Wa4UXbKuS5fKkJWdgA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=10"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/sindresorhus"
+      }
+    },
+    "node_modules/estree-walker": {
+      "version": "0.6.1",
+      "resolved": "https://registry.npmjs.org/estree-walker/-/estree-walker-0.6.1.tgz",
+      "integrity": "sha512-SqmZANLWS0mnatqbSfRP5g8OXZC12Fgg1IwNtLsyHDzJizORW4khDfjPqJZsemPWBB2uqykUah5YpQ6epsqC/w==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/exit-hook": {
+      "version": "2.2.1",
+      "resolved": "https://registry.npmjs.org/exit-hook/-/exit-hook-2.2.1.tgz",
+      "integrity": "sha512-eNTPlAD67BmP31LDINZ3U7HSF8l57TxOY2PmBJ1shpCvpnxBF93mWCE8YHBnXs8qiUZJc9WDcWIeC3a2HIAMfw==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=6"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/sindresorhus"
+      }
+    },
+    "node_modules/exsolve": {
+      "version": "1.0.8",
+      "resolved": "https://registry.npmjs.org/exsolve/-/exsolve-1.0.8.tgz",
+      "integrity": "sha512-LmDxfWXwcTArk8fUEnOfSZpHOJ6zOMUJKOtFLFqJLoKJetuQG874Uc7/Kki7zFLzYybmZhp1M7+98pfMqeX8yA==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/fsevents": {
+      "version": "2.3.3",
+      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+      }
+    },
+    "node_modules/get-source": {
+      "version": "2.0.12",
+      "resolved": "https://registry.npmjs.org/get-source/-/get-source-2.0.12.tgz",
+      "integrity": "sha512-X5+4+iD+HoSeEED+uwrQ07BOQr0kEDFMVqqpBuI+RaZBpBpHCuXxo70bjar6f0b0u/DQJsJ7ssurpP0V60Az+w==",
+      "dev": true,
+      "license": "Unlicense",
+      "dependencies": {
+        "data-uri-to-buffer": "^2.0.0",
+        "source-map": "^0.6.1"
+      }
+    },
+    "node_modules/glob-to-regexp": {
+      "version": "0.4.1",
+      "resolved": "https://registry.npmjs.org/glob-to-regexp/-/glob-to-regexp-0.4.1.tgz",
+      "integrity": "sha512-lkX1HJXwyMcprw/5YUZc2s7DrpAiHB21/V+E1rHUrVNokkvB6bqMzT0VfV6/86ZNabt1k14YOIaT7nDvOX3Iiw==",
+      "dev": true,
+      "license": "BSD-2-Clause"
+    },
+    "node_modules/is-arrayish": {
+      "version": "0.3.4",
+      "resolved": "https://registry.npmjs.org/is-arrayish/-/is-arrayish-0.3.4.tgz",
+      "integrity": "sha512-m6UrgzFVUYawGBh1dUsWR5M2Clqic9RVXC/9f8ceNlv2IcO9j9J/z8UoCLPqtsPBFNzEpfR3xftohbfqDx8EQA==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true
+    },
+    "node_modules/magic-string": {
+      "version": "0.25.9",
+      "resolved": "https://registry.npmjs.org/magic-string/-/magic-string-0.25.9.tgz",
+      "integrity": "sha512-RmF0AsMzgt25qzqqLc1+MbHmhdx0ojF2Fvs4XnOqz2ZOBXzzkEwc/dJQZCYHAn7v1jbVOjAZfK8msRn4BxO4VQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "sourcemap-codec": "^1.4.8"
+      }
+    },
+    "node_modules/mime": {
+      "version": "3.0.0",
+      "resolved": "https://registry.npmjs.org/mime/-/mime-3.0.0.tgz",
+      "integrity": "sha512-jSCU7/VB1loIWBZe14aEYHU/+1UMEHoaO7qxCOVJOw9GgH72VAWppxNcjU+x9a2k3GSIBXNKxXQFqRvvZ7vr3A==",
+      "dev": true,
+      "license": "MIT",
+      "bin": {
+        "mime": "cli.js"
+      },
+      "engines": {
+        "node": ">=10.0.0"
+      }
+    },
+    "node_modules/miniflare": {
+      "version": "3.20250718.3",
+      "resolved": "https://registry.npmjs.org/miniflare/-/miniflare-3.20250718.3.tgz",
+      "integrity": "sha512-JuPrDJhwLrNLEJiNLWO7ZzJrv/Vv9kZuwMYCfv0LskQDM6Eonw4OvywO3CH/wCGjgHzha/qyjUh8JQ068TjDgQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@cspotcode/source-map-support": "0.8.1",
+        "acorn": "8.14.0",
+        "acorn-walk": "8.3.2",
+        "exit-hook": "2.2.1",
+        "glob-to-regexp": "0.4.1",
+        "stoppable": "1.1.0",
+        "undici": "^5.28.5",
+        "workerd": "1.20250718.0",
+        "ws": "8.18.0",
+        "youch": "3.3.4",
+        "zod": "3.22.3"
+      },
+      "bin": {
+        "miniflare": "bootstrap.js"
+      },
+      "engines": {
+        "node": ">=16.13"
+      }
+    },
+    "node_modules/mustache": {
+      "version": "4.2.0",
+      "resolved": "https://registry.npmjs.org/mustache/-/mustache-4.2.0.tgz",
+      "integrity": "sha512-71ippSywq5Yb7/tVYyGbkBggbU8H3u5Rz56fH60jGFgr8uHwxs+aSKeqmluIVzM0m0kB7xQjKS6qPfd0b2ZoqQ==",
+      "dev": true,
+      "license": "MIT",
+      "bin": {
+        "mustache": "bin/mustache"
+      }
+    },
+    "node_modules/ohash": {
+      "version": "2.0.11",
+      "resolved": "https://registry.npmjs.org/ohash/-/ohash-2.0.11.tgz",
+      "integrity": "sha512-RdR9FQrFwNBNXAr4GixM8YaRZRJ5PUWbKYbE5eOsrwAjJW0q2REGcf79oYPsLyskQCZG1PLN+S/K1V00joZAoQ==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/path-to-regexp": {
+      "version": "6.3.0",
+      "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-6.3.0.tgz",
+      "integrity": "sha512-Yhpw4T9C6hPpgPeA28us07OJeqZ5EzQTkbfwuhsUg0c237RomFoETJgmp2sa3F/41gfLE6G5cqcYwznmeEeOlQ==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/pathe": {
+      "version": "2.0.3",
+      "resolved": "https://registry.npmjs.org/pathe/-/pathe-2.0.3.tgz",
+      "integrity": "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/printable-characters": {
+      "version": "1.0.42",
+      "resolved": "https://registry.npmjs.org/printable-characters/-/printable-characters-1.0.42.tgz",
+      "integrity": "sha512-dKp+C4iXWK4vVYZmYSd0KBH5F/h1HoZRsbJ82AVKRO3PEo8L4lBS/vLwhVtpwwuYcoIsVY+1JYKR268yn480uQ==",
+      "dev": true,
+      "license": "Unlicense"
+    },
+    "node_modules/rollup-plugin-inject": {
+      "version": "3.0.2",
+      "resolved": "https://registry.npmjs.org/rollup-plugin-inject/-/rollup-plugin-inject-3.0.2.tgz",
+      "integrity": "sha512-ptg9PQwzs3orn4jkgXJ74bfs5vYz1NCZlSQMBUA0wKcGp5i5pA1AO3fOUEte8enhGUC+iapTCzEWw2jEFFUO/w==",
+      "deprecated": "This package has been deprecated and is no longer maintained. Please use @rollup/plugin-inject.",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "estree-walker": "^0.6.1",
+        "magic-string": "^0.25.3",
+        "rollup-pluginutils": "^2.8.1"
+      }
+    },
+    "node_modules/rollup-plugin-node-polyfills": {
+      "version": "0.2.1",
+      "resolved": "https://registry.npmjs.org/rollup-plugin-node-polyfills/-/rollup-plugin-node-polyfills-0.2.1.tgz",
+      "integrity": "sha512-4kCrKPTJ6sK4/gLL/U5QzVT8cxJcofO0OU74tnB19F40cmuAKSzH5/siithxlofFEjwvw1YAhPmbvGNA6jEroA==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "rollup-plugin-inject": "^3.0.0"
+      }
+    },
+    "node_modules/rollup-pluginutils": {
+      "version": "2.8.2",
+      "resolved": "https://registry.npmjs.org/rollup-pluginutils/-/rollup-pluginutils-2.8.2.tgz",
+      "integrity": "sha512-EEp9NhnUkwY8aif6bxgovPHMoMoNr2FulJziTndpt5H9RdwC47GSGuII9XxpSdzVGM0GWrNPHV6ie1LTNJPaLQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "estree-walker": "^0.6.1"
+      }
+    },
+    "node_modules/semver": {
+      "version": "7.8.0",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.0.tgz",
+      "integrity": "sha512-AcM7dV/5ul4EekoQ29Agm5vri8JNqRyj39o0qpX6vDF2GZrtutZl5RwgD1XnZjiTAfncsJhMI48QQH3sN87YNA==",
+      "dev": true,
+      "license": "ISC",
+      "optional": true,
+      "bin": {
+        "semver": "bin/semver.js"
+      },
+      "engines": {
+        "node": ">=10"
+      }
+    },
+    "node_modules/sharp": {
+      "version": "0.33.5",
+      "resolved": "https://registry.npmjs.org/sharp/-/sharp-0.33.5.tgz",
+      "integrity": "sha512-haPVm1EkS9pgvHrQ/F3Xy+hgcuMV0Wm9vfIBSiwZ05k+xgb0PkBQpGsAA/oWdDobNaZTH5ppvHtzCFbnSEwHVw==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "Apache-2.0",
+      "optional": true,
+      "dependencies": {
+        "color": "^4.2.3",
+        "detect-libc": "^2.0.3",
+        "semver": "^7.6.3"
+      },
+      "engines": {
+        "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+      },
+      "funding": {
+        "url": "https://opencollective.com/libvips"
+      },
+      "optionalDependencies": {
+        "@img/sharp-darwin-arm64": "0.33.5",
+        "@img/sharp-darwin-x64": "0.33.5",
+        "@img/sharp-libvips-darwin-arm64": "1.0.4",
+        "@img/sharp-libvips-darwin-x64": "1.0.4",
+        "@img/sharp-libvips-linux-arm": "1.0.5",
+        "@img/sharp-libvips-linux-arm64": "1.0.4",
+        "@img/sharp-libvips-linux-s390x": "1.0.4",
+        "@img/sharp-libvips-linux-x64": "1.0.4",
+        "@img/sharp-libvips-linuxmusl-arm64": "1.0.4",
+        "@img/sharp-libvips-linuxmusl-x64": "1.0.4",
+        "@img/sharp-linux-arm": "0.33.5",
+        "@img/sharp-linux-arm64": "0.33.5",
+        "@img/sharp-linux-s390x": "0.33.5",
+        "@img/sharp-linux-x64": "0.33.5",
+        "@img/sharp-linuxmusl-arm64": "0.33.5",
+        "@img/sharp-linuxmusl-x64": "0.33.5",
+        "@img/sharp-wasm32": "0.33.5",
+        "@img/sharp-win32-ia32": "0.33.5",
+        "@img/sharp-win32-x64": "0.33.5"
+      }
+    },
+    "node_modules/simple-swizzle": {
+      "version": "0.2.4",
+      "resolved": "https://registry.npmjs.org/simple-swizzle/-/simple-swizzle-0.2.4.tgz",
+      "integrity": "sha512-nAu1WFPQSMNr2Zn9PGSZK9AGn4t/y97lEm+MXTtUDwfP0ksAIX4nO+6ruD9Jwut4C49SB1Ws+fbXsm/yScWOHw==",
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "dependencies": {
+        "is-arrayish": "^0.3.1"
+      }
+    },
+    "node_modules/source-map": {
+      "version": "0.6.1",
+      "resolved": "https://registry.npmjs.org/source-map/-/source-map-0.6.1.tgz",
+      "integrity": "sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g==",
+      "dev": true,
+      "license": "BSD-3-Clause",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/sourcemap-codec": {
+      "version": "1.4.8",
+      "resolved": "https://registry.npmjs.org/sourcemap-codec/-/sourcemap-codec-1.4.8.tgz",
+      "integrity": "sha512-9NykojV5Uih4lgo5So5dtw+f0JgJX30KCNI8gwhz2J9A15wD0Ml6tjHKwf6fTSa6fAdVBdZeNOs9eJ71qCk8vA==",
+      "deprecated": "Please use @jridgewell/sourcemap-codec instead",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/stacktracey": {
+      "version": "2.2.0",
+      "resolved": "https://registry.npmjs.org/stacktracey/-/stacktracey-2.2.0.tgz",
+      "integrity": "sha512-ETyQEz+CzXiLjEbyJqpbp+/T79RQD/6wqFucRBIlVNZfYq2Ay7wbretD4cxpbymZlaPWx58aIhPEY1Cr8DlVvg==",
+      "dev": true,
+      "license": "Unlicense",
+      "dependencies": {
+        "as-table": "^1.0.36",
+        "get-source": "^2.0.12"
+      }
+    },
+    "node_modules/stoppable": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/stoppable/-/stoppable-1.1.0.tgz",
+      "integrity": "sha512-KXDYZ9dszj6bzvnEMRYvxgeTHU74QBFL54XKtP3nyMuJ81CFYtABZ3bAzL2EdFUaEwJOBOgENyFj3R7oTzDyyw==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=4",
+        "npm": ">=6"
+      }
+    },
+    "node_modules/tslib": {
+      "version": "2.8.1",
+      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
+      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+      "dev": true,
+      "license": "0BSD",
+      "optional": true
+    },
+    "node_modules/ufo": {
+      "version": "1.6.4",
+      "resolved": "https://registry.npmjs.org/ufo/-/ufo-1.6.4.tgz",
+      "integrity": "sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/undici": {
+      "version": "5.29.0",
+      "resolved": "https://registry.npmjs.org/undici/-/undici-5.29.0.tgz",
+      "integrity": "sha512-raqeBD6NQK4SkWhQzeYKd1KmIG6dllBOTt55Rmkt4HtI9mwdWtJljnrXjAFUBLTSN67HWrOIZ3EPF4kjUw80Bg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@fastify/busboy": "^2.0.0"
+      },
+      "engines": {
+        "node": ">=14.0"
+      }
+    },
+    "node_modules/unenv": {
+      "version": "2.0.0-rc.14",
+      "resolved": "https://registry.npmjs.org/unenv/-/unenv-2.0.0-rc.14.tgz",
+      "integrity": "sha512-od496pShMen7nOy5VmVJCnq8rptd45vh6Nx/r2iPbrba6pa6p+tS2ywuIHRZ/OBvSbQZB0kWvpO9XBNVFXHD3Q==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "defu": "^6.1.4",
+        "exsolve": "^1.0.1",
+        "ohash": "^2.0.10",
+        "pathe": "^2.0.3",
+        "ufo": "^1.5.4"
+      }
+    },
+    "node_modules/workerd": {
+      "version": "1.20250718.0",
+      "resolved": "https://registry.npmjs.org/workerd/-/workerd-1.20250718.0.tgz",
+      "integrity": "sha512-kqkIJP/eOfDlUyBzU7joBg+tl8aB25gEAGqDap+nFWb+WHhnooxjGHgxPBy3ipw2hnShPFNOQt5lFRxbwALirg==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "Apache-2.0",
+      "bin": {
+        "workerd": "bin/workerd"
+      },
+      "engines": {
+        "node": ">=16"
+      },
+      "optionalDependencies": {
+        "@cloudflare/workerd-darwin-64": "1.20250718.0",
+        "@cloudflare/workerd-darwin-arm64": "1.20250718.0",
+        "@cloudflare/workerd-linux-64": "1.20250718.0",
+        "@cloudflare/workerd-linux-arm64": "1.20250718.0",
+        "@cloudflare/workerd-windows-64": "1.20250718.0"
+      }
+    },
+    "node_modules/wrangler": {
+      "version": "3.114.17",
+      "resolved": "https://registry.npmjs.org/wrangler/-/wrangler-3.114.17.tgz",
+      "integrity": "sha512-tAvf7ly+tB+zwwrmjsCyJ2pJnnc7SZhbnNwXbH+OIdVas3zTSmjcZOjmLKcGGptssAA3RyTKhcF9BvKZzMUycA==",
+      "dev": true,
+      "license": "MIT OR Apache-2.0",
+      "dependencies": {
+        "@cloudflare/kv-asset-handler": "0.3.4",
+        "@cloudflare/unenv-preset": "2.0.2",
+        "@esbuild-plugins/node-globals-polyfill": "0.2.3",
+        "@esbuild-plugins/node-modules-polyfill": "0.2.2",
+        "blake3-wasm": "2.1.5",
+        "esbuild": "0.17.19",
+        "miniflare": "3.20250718.3",
+        "path-to-regexp": "6.3.0",
+        "unenv": "2.0.0-rc.14",
+        "workerd": "1.20250718.0"
+      },
+      "bin": {
+        "wrangler": "bin/wrangler.js",
+        "wrangler2": "bin/wrangler.js"
+      },
+      "engines": {
+        "node": ">=16.17.0"
+      },
+      "optionalDependencies": {
+        "fsevents": "~2.3.2",
+        "sharp": "^0.33.5"
+      },
+      "peerDependencies": {
+        "@cloudflare/workers-types": "^4.20250408.0"
+      },
+      "peerDependenciesMeta": {
+        "@cloudflare/workers-types": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/ws": {
+      "version": "8.18.0",
+      "resolved": "https://registry.npmjs.org/ws/-/ws-8.18.0.tgz",
+      "integrity": "sha512-8VbfWfHLbbwu3+N6OKsOMpBdT4kXPDDB9cJk2bJ6mh9ucxdlnNvH1e+roYkKmN9Nxw2yjz7VzeO9oOz2zJ04Pw==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=10.0.0"
+      },
+      "peerDependencies": {
+        "bufferutil": "^4.0.1",
+        "utf-8-validate": ">=5.0.2"
+      },
+      "peerDependenciesMeta": {
+        "bufferutil": {
+          "optional": true
+        },
+        "utf-8-validate": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/youch": {
+      "version": "3.3.4",
+      "resolved": "https://registry.npmjs.org/youch/-/youch-3.3.4.tgz",
+      "integrity": "sha512-UeVBXie8cA35DS6+nBkls68xaBBXCye0CNznrhszZjTbRVnJKQuNsyLKBTTL4ln1o1rh2PKtv35twV7irj5SEg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "cookie": "^0.7.1",
+        "mustache": "^4.2.0",
+        "stacktracey": "^2.1.8"
+      }
+    },
+    "node_modules/zod": {
+      "version": "3.22.3",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-3.22.3.tgz",
+      "integrity": "sha512-EjIevzuJRiRPbVH4mGc8nApb/lVLKVpmUhAaR5R5doKGfAnGJ6Gr3CViAVjP+4FWSxCsybeWQdcgCtbX+7oZug==",
+      "dev": true,
+      "license": "MIT",
+      "funding": {
+        "url": "https://github.com/sponsors/colinhacks"
+      }
+    }
+  }
+}
+</file>
+
+<file path="server/package.json">
+{
+  "name": "clipnote-server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy && wrangler pages deploy ../client --project-name clipnote",
+    "deploy:worker": "wrangler deploy",
+    "deploy:client": "wrangler pages deploy ../client --project-name clipnote",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
+</file>
+
+<file path="server/src/index.js">
+/**
+ * ClipNote Server — Cloudflare Workers
+ *
+ * 環境変数:
+ *   API_KEY : 認証キー (wrangler secret put API_KEY)
+ *
+ * エンドポイント:
+ *   WS   /ws/:roomId            リアルタイム同期
+ *   GET  /notes/:roomId         メモ一覧 + ブロック全取得
+ *   GET  /ping                  ヘルスチェック
+ */
+
+export { NoteRoom } from './room.js';
+
+const INIT_SQL = `
+CREATE TABLE IF NOT EXISTS notes (
+  id         TEXT PRIMARY KEY,
+  room_id    TEXT NOT NULL,
+  title      TEXT NOT NULL DEFAULT '',
+  pinned     INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  item_order TEXT
+);
+CREATE TABLE IF NOT EXISTS groups (
+  id         TEXT PRIMARY KEY,
+  note_id    TEXT NOT NULL,
+  room_id    TEXT NOT NULL,
+  title      TEXT NOT NULL DEFAULT 'グループ',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS blocks (
+  id          TEXT PRIMARY KEY,
+  note_id     TEXT NOT NULL,
+  room_id     TEXT NOT NULL,
+  text        TEXT NOT NULL DEFAULT '',
+  pinned      INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  group_id    TEXT,
+  group_order INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_notes_room   ON notes(room_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_groups_note  ON groups(note_id);
+CREATE INDEX IF NOT EXISTS idx_blocks_note  ON blocks(note_id, created_at);
+`;
+
+const _dbInitMap = new WeakMap();
+async function ensureDb(env) {
+  if (!env.DB) return;
+  if (!_dbInitMap.has(env)) {
+    const promise = env.DB.exec(INIT_SQL).catch(e => {
+      _dbInitMap.delete(env);
+      throw e;
+    });
+    _dbInitMap.set(env, promise);
+  }
+  await _dbInitMap.get(env);
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const parts = url.pathname.split('/').filter(Boolean);
+
+    if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }), env);
+    if (url.pathname === '/ping') return cors(new Response('pong'), env);
+
+    const isWsUpgrade = parts[0] === 'ws' && parts[1] &&
+      request.headers.get('Upgrade') === 'websocket';
+
+    if (!isWsUpgrade) {
+      const authErr = checkAuth(request, env);
+      if (authErr) return cors(authErr, env);
+    }
+
+    // [fix #12] DB初期化エラーを握り潰さず、失敗時はログに残す
+    try {
+      await ensureDb(env);
+    } catch (e) {
+      console.error('DB initialization failed:', e);
+      // DB初期化失敗でもWS接続は継続させる（DO側でも初期化を試みる）
+    }
+
+    // WebSocket → Durable Object へ
+    if (isWsUpgrade) {
+      const id = env.NOTE_ROOM.idFromName(parts[1]);
+      const headers = new Headers(request.headers);
+      headers.set('X-Api-Key-Expected', env.API_KEY || '');
+      const newReq = new Request(request.url, { headers, cf: request.cf });
+      const doResp = await env.NOTE_ROOM.get(id).fetch(newReq);
+      if (doResp.status === 101) return doResp;
+      return cors(doResp, env);
+    }
+
+    // REST: メモ + ブロック + グループ一括取得
+    if (request.method === 'GET' && parts[0] === 'notes' && parts[1]) {
+      return cors(await handleLoad(env, parts[1]), env);
+    }
+
+    return cors(new Response('not found', { status: 404 }), env);
+  },
+};
+
+// ---------- REST handlers ----------
+
+async function handleLoad(env, roomId) {
+  if (!env.DB) return jsonResp({ error: 'DB not configured' }, 500);
+
+  const [notesRes, blocksRes, groupsRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT * FROM notes WHERE room_id=? ORDER BY pinned DESC, updated_at DESC`
+    ).bind(roomId).all(),
+    env.DB.prepare(
+      `SELECT * FROM blocks WHERE room_id=? ORDER BY note_id, created_at DESC`
+    ).bind(roomId).all(),
+    env.DB.prepare(
+      `SELECT * FROM groups WHERE room_id=?`
+    ).bind(roomId).all(),
+  ]);
+
+  const blocksByNote = {};
+  for (const b of (blocksRes.results || [])) {
+    if (!blocksByNote[b.note_id]) blocksByNote[b.note_id] = [];
+    blocksByNote[b.note_id].push({
+      id: b.id,
+      noteId: b.note_id,
+      text: b.text,
+      pinned: b.pinned === 1,
+      createdAt: b.created_at,
+      updatedAt: b.updated_at,
+      groupId: b.group_id || null,
+      groupOrder: b.group_order ?? null,
+    });
+  }
+
+  const groupsByNote = {};
+  for (const g of (groupsRes.results || [])) {
+    if (!groupsByNote[g.note_id]) groupsByNote[g.note_id] = [];
+    groupsByNote[g.note_id].push({
+      id: g.id,
+      title: g.title,
+    });
+  }
+
+  const notes = (notesRes.results || []).map(n => {
+    // [fix #11] item_order の JSON パースを安全に行う
+    let itemOrder = [];
+    if (n.item_order) {
+      try {
+        itemOrder = JSON.parse(n.item_order);
+      } catch (e) {
+        console.warn('Failed to parse item_order for note', n.id, e);
+      }
+    }
+    return {
+      id: n.id,
+      title: n.title,
+      pinned: n.pinned === 1,
+      updatedAt: n.updated_at,
+      itemOrder,
+      blocks: blocksByNote[n.id] || [],
+      groups: groupsByNote[n.id] || [],
+    };
+  });
+
+  return jsonResp({ notes });
+}
+
+// ---------- Auth ----------
+
+function checkAuth(request, env) {
+  // [fix #3] API_KEY 未設定の場合は設定ミスとして拒否する
+  if (!env.API_KEY) {
+    console.error('API_KEY is not configured. All requests are rejected.');
+    return jsonResp({ error: 'server misconfigured' }, 500);
+  }
+  const key = request.headers.get('X-Api-Key');
+  if (key !== env.API_KEY) return jsonResp({ error: 'unauthorized' }, 401);
+  return null;
+}
+
+// ---------- Helpers ----------
+
+function jsonResp(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+// [fix #5] CORS を環境変数 ALLOWED_ORIGIN で制限可能にする
+// ALLOWED_ORIGIN 未設定時は開発用途として '*' にフォールバック（本番では必ず設定すること）
+function cors(res, env) {
+  const origin = (env && env.ALLOWED_ORIGIN) ? env.ALLOWED_ORIGIN : '*';
+  const h = new Headers(res.headers);
+  h.set('Access-Control-Allow-Origin', origin);
+  h.set('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key');
+  h.set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  return new Response(res.body, { status: res.status, headers: h });
+}
+</file>
+
+<file path="server/src/room.js">
+/**
+ * NoteRoom — Durable Object
+ * WebSocketでメモの変更をリアルタイム同期 + D1へ永続化
+ *
+ * 修正:
+ *  #1 WS接続後の最初のメッセージで auth を要求（クエリパラメータ認証を廃止）
+ *  #2 _expectedKey の競合状態を修正（接続ごとのローカル変数で管理）
+ *  #4 送信元へのエコーバックを行わない（二重適用防止）
+ *  #6 ブロードキャスト時に送信元を除外（エコーバック修正）
+ *  #NEW 認証状態をタグで管理（WeakSetはDO再起動で消えるため）
+ */
+
+// タグのインデックス定義
+const TAG_ROOM_ID = 0; // タグ[0]: roomId
+const TAG_META = 1; // タグ[1]: JSON { expectedKey, authed }
+
+export class NoteRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this._dbReady = null;
+    // _authedSockets (WeakSet) を廃止。
+    // 認証状態はタグ内の authed フラグで管理し、DO再起動後も維持される。
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const parts = url.pathname.split('/').filter(Boolean);
+
+    if (parts[0] === 'ws') {
+      if (request.headers.get('Upgrade') !== 'websocket') {
+        return new Response('WebSocket required', { status: 426 });
+      }
+      return this._handleWS(request);
+    }
+
+    return new Response('not found', { status: 404 });
+  }
+
+  // ---------- WebSocket ----------
+
+  async _handleWS(request) {
+    const expectedKey = request.headers.get('X-Api-Key-Expected') || null;
+
+    const [client, server] = Object.values(new WebSocketPair());
+    const parts = new URL(request.url).pathname.split('/').filter(Boolean);
+    const roomId = parts[1] || '';
+
+    // 認証状態(authed)と expectedKey を両方タグに保存する
+    // DO再起動後もタグは永続するので認証状態が失われない
+    this.state.acceptWebSocket(server, [
+      roomId,
+      JSON.stringify({ expectedKey, authed: false })
+    ]);
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // タグのメタ情報を取得
+  _getMeta(ws) {
+    const tags = this.state.getTags(ws);
+    if (!tags || !tags[TAG_META]) return { expectedKey: null, authed: false };
+    try { return JSON.parse(tags[TAG_META]); } catch { return { expectedKey: null, authed: false }; }
+  }
+
+  // 認証済みフラグをタグに書き込む（タグ自体は変更不可なので ws.serializeAttachment を使う）
+  _setAuthed(ws) {
+    // Cloudflare DOのタグは変更不可のため、attachmentで認証状態を管理する
+    ws.serializeAttachment({ authed: true });
+  }
+
+  _isAuthed(ws) {
+    try {
+      const att = ws.deserializeAttachment();
+      return !!(att && att.authed);
+    } catch { return false; }
+  }
+
+  async webSocketMessage(ws, message) {
+    try {
+      const msg = JSON.parse(message);
+      const tags = this.state.getTags(ws);
+      const roomId = (tags && tags[TAG_ROOM_ID]) || '';
+      const meta = this._getMeta(ws);
+
+      // 未認証ソケットは auth メッセージのみ受け付ける
+      if (!this._isAuthed(ws)) {
+        if (msg.type === 'auth') {
+          const ok = !meta.expectedKey || msg.key === meta.expectedKey;
+          if (ok) {
+            this._setAuthed(ws);
+            ws.send(JSON.stringify({ type: 'auth_ok' }));
+          } else {
+            ws.send(JSON.stringify({ type: 'auth_error', reason: 'invalid key' }));
+            ws.close(4001, 'unauthorized');
+          }
+        }
+        return;
+      }
+
+      if (msg.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+        return;
+      }
+
+      if (msg.type === 'sync' && msg.action) {
+        const result = await this._handleSync(msg, roomId);
+        if (!result.ok) {
+          ws.send(JSON.stringify({
+            type: 'sync_error',
+            clientMsgId: msg.clientMsgId || null,
+            action: msg.action,
+            error: result.error || 'sync failed'
+          }));
+          return;
+        }
+        // [fix #6] 送信元(ws)を除外してブロードキャスト（エコーバック防止）
+        const json = JSON.stringify(msg);
+        for (const s of this.state.getWebSockets()) {
+          if (s !== ws && s.readyState === WebSocket.OPEN && this._isAuthed(s)) {
+            s.send(json);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('ws message error', e);
+    }
+  }
+
+  async webSocketClose() { }
+  async webSocketError() { }
+
+  // ---------- DB ----------
+
+  async _ensureDb() {
+    if (!this.env.DB) return;
+    if (!this._dbReady) {
+      this._dbReady = (async () => {
+        const stmts = [
+          `CREATE TABLE IF NOT EXISTS notes (
+            id TEXT PRIMARY KEY,
+            room_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            pinned INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            item_order TEXT
+          )`,
+          `CREATE TABLE IF NOT EXISTS groups (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT 'グループ',
+            created_at TEXT NOT NULL
+          )`,
+          `CREATE TABLE IF NOT EXISTS blocks (
+            id TEXT PRIMARY KEY,
+            note_id TEXT NOT NULL,
+            room_id TEXT NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            pinned INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            group_id TEXT,
+            group_order INTEGER
+          )`,
+          `CREATE INDEX IF NOT EXISTS idx_notes_room  ON notes(room_id, updated_at)`,
+          `CREATE INDEX IF NOT EXISTS idx_groups_note ON groups(note_id)`,
+          `CREATE INDEX IF NOT EXISTS idx_blocks_note ON blocks(note_id, created_at)`,
+        ];
+        for (const sql of stmts) {
+          await this.env.DB.prepare(sql).run().catch(() => { });
+        }
+        // 既存DBへのカラム追加（ALTER TABLE は既存カラムがあるとエラーになるので握り潰す）
+        const alters = [
+          `ALTER TABLE notes  ADD COLUMN item_order  TEXT`,
+          `ALTER TABLE blocks ADD COLUMN group_id    TEXT`,
+          `ALTER TABLE blocks ADD COLUMN group_order INTEGER`,
+        ];
+        for (const sql of alters) {
+          await this.env.DB.prepare(sql).run().catch(() => { });
+        }
+      })().catch(e => { this._dbReady = null; throw e; });
+    }
+    await this._dbReady;
+  }
+
+  async _handleSync(msg, roomId) {
+    if (!this.env.DB) return { ok: false, error: 'DB not configured' };
+    try {
+      await this._ensureDb();
+      const now = new Date().toISOString();
+      const { action, payload } = msg;
+      const noteUpdatedAt = payload.noteUpdatedAt || payload.updatedAt || now;
+
+      // ---------- note_upsert ----------
+      if (action === 'note_upsert') {
+        payload.updatedAt = payload.updatedAt || now;
+        const itemOrderJson = payload.itemOrder
+          ? JSON.stringify(payload.itemOrder)
+          : null;
+
+        await this.env.DB.prepare(
+          `INSERT INTO notes (id, room_id, title, pinned, updated_at, item_order)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             title      = excluded.title,
+             pinned     = excluded.pinned,
+             updated_at = excluded.updated_at,
+             item_order = excluded.item_order
+           WHERE excluded.updated_at >= notes.updated_at`
+        ).bind(
+          payload.id, roomId,
+          payload.title || '',
+          payload.pinned ? 1 : 0,
+          payload.updatedAt,
+          itemOrderJson
+        ).run();
+
+        // groups を全置換（差分管理より確実）
+        if (payload.groups && Array.isArray(payload.groups)) {
+          await this.env.DB.prepare(
+            `DELETE FROM groups WHERE note_id=? AND room_id=?`
+          ).bind(payload.id, roomId).run();
+
+          for (const g of payload.groups) {
+            await this.env.DB.prepare(
+              `INSERT OR IGNORE INTO groups (id, note_id, room_id, title, created_at)
+               VALUES (?, ?, ?, ?, ?)`
+            ).bind(g.id, payload.id, roomId, g.title || 'グループ', now).run();
+            // タイトル更新
+            await this.env.DB.prepare(
+              `UPDATE groups SET title=? WHERE id=? AND room_id=?`
+            ).bind(g.title || 'グループ', g.id, roomId).run();
+          }
+        }
+
+        // note_upsert に blocks が含まれる場合、groupId/groupOrder を同期
+        if (payload.blocks && Array.isArray(payload.blocks)) {
+          for (const b of payload.blocks) {
+            await this.env.DB.prepare(
+              `INSERT INTO blocks (id, note_id, room_id, text, pinned, created_at, updated_at, group_id, group_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 group_id    = excluded.group_id,
+                 group_order = excluded.group_order`
+            ).bind(
+              b.id,
+              payload.id,
+              roomId,
+              b.text || '',
+              b.pinned ? 1 : 0,
+              b.createdAt || now,
+              b.updatedAt || now,
+              b.groupId || null,
+              b.groupOrder ?? null
+            ).run();
+          }
+        }
+      }
+
+      // ---------- note_delete ----------
+      if (action === 'note_delete') {
+        await this.env.DB.prepare(
+          `DELETE FROM notes WHERE id=? AND room_id=?`
+        ).bind(payload.id, roomId).run();
+        await this.env.DB.prepare(
+          `DELETE FROM blocks WHERE note_id=? AND room_id=?`
+        ).bind(payload.id, roomId).run();
+        await this.env.DB.prepare(
+          `DELETE FROM groups WHERE note_id=? AND room_id=?`
+        ).bind(payload.id, roomId).run();
+      }
+
+      // ---------- block_upsert ----------
+      if (action === 'block_upsert') {
+        payload.createdAt = payload.createdAt || now;
+        payload.updatedAt = payload.updatedAt || now;
+        payload.noteUpdatedAt = noteUpdatedAt;
+        await this.env.DB.prepare(
+          `INSERT INTO blocks (id, note_id, room_id, text, pinned, created_at, updated_at, group_id, group_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             created_at  = excluded.created_at,
+             text        = excluded.text,
+             pinned      = excluded.pinned,
+             updated_at  = excluded.updated_at,
+             group_id    = excluded.group_id,
+             group_order = excluded.group_order
+           WHERE excluded.updated_at >= blocks.updated_at`
+        ).bind(
+          payload.id,
+          payload.noteId,
+          roomId,
+          payload.text || '',
+          payload.pinned ? 1 : 0,
+          payload.createdAt,
+          payload.updatedAt,
+          payload.groupId || null,
+          payload.groupOrder ?? null
+        ).run();
+        await this.env.DB.prepare(
+          `UPDATE notes SET updated_at=? WHERE id=? AND room_id=? AND updated_at <= ?`
+        ).bind(payload.noteUpdatedAt, payload.noteId, roomId, payload.noteUpdatedAt).run();
+      }
+
+      // ---------- block_delete ----------
+      if (action === 'block_delete') {
+        payload.noteUpdatedAt = noteUpdatedAt;
+        await this.env.DB.prepare(
+          `DELETE FROM blocks WHERE id=? AND room_id=?`
+        ).bind(payload.id, roomId).run();
+        await this.env.DB.prepare(
+          `UPDATE notes SET updated_at=? WHERE id=? AND room_id=? AND updated_at <= ?`
+        ).bind(payload.noteUpdatedAt, payload.noteId, roomId, payload.noteUpdatedAt).run();
+      }
+      msg.serverAckAt = new Date().toISOString();
+      return { ok: true };
+    } catch (e) {
+      console.warn('DB sync error', e);
+      return { ok: false, error: e && e.message ? e.message : 'DB sync error' };
+    }
+  }
+}
+</file>
+
+<file path="server/wrangler.toml">
+name = "clipnote"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "NOTE_ROOM"
+class_name = "NoteRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NoteRoom"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "clipnote-db"
+database_id = "a95e8400-092a-4559-95dc-1aed8e87bcb5"
+</file>
+
+<file path="wrangler.jsonc">
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "clipnote-v2",
+  "compatibility_date": "2026-05-25",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "client"
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
+}
+</file>
